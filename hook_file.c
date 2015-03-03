@@ -90,15 +90,14 @@ static void cache_file(HANDLE file_handle, const wchar_t *path,
     file_record_t *r = lookup_add(&g_files, (unsigned int) file_handle,
         sizeof(file_record_t) + length_in_chars * sizeof(wchar_t) + sizeof(wchar_t));
 
-    *r = (file_record_t) {
-        .attributes = attributes,
-        .length     = length_in_chars,
-    };
+	memset(r, 0, sizeof(*r));
+	r->attributes = attributes;
+	r->length = length_in_chars;
 
     wcsncpy(r->filename, path, r->length + 1);
 }
 
-static void file_write(HANDLE file_handle)
+void file_write(HANDLE file_handle)
 {
 	file_record_t *r;
 	lasterror_t lasterror;
@@ -107,12 +106,10 @@ static void file_write(HANDLE file_handle)
 
 	r = lookup_get(&g_files, (unsigned int)file_handle, NULL);
     if(r != NULL) {
-        UNICODE_STRING str = {
-            // microsoft actually meant "size"
-            .Length         = (USHORT)r->length * sizeof(wchar_t),
-			.MaximumLength = ((USHORT)r->length + 1) * sizeof(wchar_t),
-            .Buffer         = r->filename,
-        };
+		UNICODE_STRING str;
+		str.Length = (USHORT)r->length * sizeof(wchar_t);
+		str.MaximumLength = ((USHORT)r->length + 1) * sizeof(wchar_t);
+		str.Buffer = r->filename;
 
         // we do in fact want to dump this file because it was written to
         new_file(&str);
@@ -190,6 +187,26 @@ void file_close(HANDLE file_handle)
 	set_lasterrors(&lasterror);
 }
 
+static BOOLEAN is_protected_objattr(POBJECT_ATTRIBUTES obj)
+{
+	wchar_t path[MAX_PATH_PLUS_TOLERANCE];
+	wchar_t *absolutepath = malloc(32768 * sizeof(wchar_t));
+	if (absolutepath) {
+		path_from_object_attributes(obj, path, MAX_PATH_PLUS_TOLERANCE);
+		ensure_absolute_unicode_path(absolutepath, path);
+		if (!wcsnicmp(g_config.w_analyzer, absolutepath, wcslen(g_config.w_analyzer))) {
+			lasterror_t lasterror;
+			lasterror.NtstatusError = STATUS_ACCESS_DENIED;
+			lasterror.Win32Error = ERROR_ACCESS_DENIED;
+			set_lasterrors(&lasterror);
+			free(absolutepath);
+			return TRUE;
+		}
+		free(absolutepath);
+	}
+	return FALSE;
+}
+
 HOOKDEF(NTSTATUS, WINAPI, NtCreateFile,
     __out     PHANDLE FileHandle,
     __in      ACCESS_MASK DesiredAccess,
@@ -206,6 +223,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateFile,
 	NTSTATUS ret;
 
 	check_for_logging_resumption(ObjectAttributes);
+
+	if (is_protected_objattr(ObjectAttributes))
+		return STATUS_ACCESS_DENIED;
 
     ret = Old_NtCreateFile(FileHandle, DesiredAccess,
         ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes,
@@ -230,6 +250,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtOpenFile,
 	NTSTATUS ret;
 	
 	check_for_logging_resumption(ObjectAttributes);
+
+	if (is_protected_objattr(ObjectAttributes))
+		return STATUS_ACCESS_DENIED;
 
 	ret = Old_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes,
 		IoStatusBlock, ShareAccess | FILE_SHARE_READ, OpenOptions);
@@ -299,12 +322,14 @@ HOOKDEF(NTSTATUS, WINAPI, NtDeleteFile,
 ) {
 	wchar_t path[MAX_PATH_PLUS_TOLERANCE];
 	wchar_t *absolutepath = malloc(32768 * sizeof(wchar_t));
+	NTSTATUS ret;
+
 	path_from_object_attributes(ObjectAttributes, path, MAX_PATH_PLUS_TOLERANCE);
 	ensure_absolute_unicode_path(absolutepath, path);
 
 	pipe("FILE_DEL:%Z", absolutepath);
 
-    NTSTATUS ret = Old_NtDeleteFile(ObjectAttributes);
+    ret = Old_NtDeleteFile(ObjectAttributes);
 	LOQ_ntstatus("filesystem", "u", "FileName", absolutepath);
 
 	free(absolutepath);
@@ -339,7 +364,8 @@ HOOKDEF(NTSTATUS, WINAPI, NtDeviceIoControlFile,
 	}
 	/* fake model name */
 	if (NT_SUCCESS(ret) && IoControlCode == IOCTL_STORAGE_QUERY_PROPERTY && OutputBuffer && OutputBufferLength > 4) {
-		for (ULONG i = 0; i < OutputBufferLength - 4; i++) {
+		ULONG i;
+		for (i = 0; i < OutputBufferLength - 4; i++) {
 			if (!memcmp(&((PCHAR)OutputBuffer)[i], "QEMU", 4))
 				memcpy(&((PCHAR)OutputBuffer)[i], "DELL", 4);
 		}
@@ -361,12 +387,13 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryFile,
     __in      BOOLEAN RestartScan
 ) {
 	OBJECT_ATTRIBUTES objattr;
+	NTSTATUS ret;
 
 	memset(&objattr, 0, sizeof(objattr));
 	objattr.ObjectName = FileName;
 	objattr.RootDirectory = FileHandle;
 
-    NTSTATUS ret = Old_NtQueryDirectoryFile(FileHandle, Event,
+    ret = Old_NtQueryDirectoryFile(FileHandle, Event,
         ApcRoutine, ApcContext, IoStatusBlock, FileInformation,
         Length, FileInformationClass, ReturnSingleEntry,
         FileName, RestartScan);
@@ -423,6 +450,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtSetInformationFile,
     __in   FILE_INFORMATION_CLASS FileInformationClass
 ) {
 	wchar_t *fname = calloc(32768, sizeof(wchar_t));
+	NTSTATUS ret;
 
 	path_from_handle(FileHandle, fname, 32768);
 	
@@ -432,7 +460,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtSetInformationFile,
 		pipe("FILE_DEL:%F", fname);
     }
 
-    NTSTATUS ret = Old_NtSetInformationFile(FileHandle, IoStatusBlock,
+    ret = Old_NtSetInformationFile(FileHandle, IoStatusBlock,
         FileInformation, Length, FileInformationClass);
 	LOQ_ntstatus("filesystem", "pFib", "FileHandle", FileHandle, "HandleName", fname, "FileInformationClass", FileInformationClass,
         "FileInformation", Length, FileInformation);
@@ -490,10 +518,11 @@ HOOKDEF(BOOL, WINAPI, RemoveDirectoryA,
     __in  LPCSTR lpPathName
 ) {
 	char path[MAX_PATH];
+	BOOL ret;
 
 	ensure_absolute_ascii_path(path, lpPathName);
 
-    BOOL ret = Old_RemoveDirectoryA(lpPathName);
+    ret = Old_RemoveDirectoryA(lpPathName);
 	LOQ_bool("filesystem", "s", "DirectoryName", path);
 
     return ret;
@@ -503,10 +532,11 @@ HOOKDEF(BOOL, WINAPI, RemoveDirectoryW,
     __in  LPWSTR lpPathName
 ) {
 	wchar_t *path = malloc(32768 * sizeof(wchar_t));
+	BOOL ret;
 
 	ensure_absolute_unicode_path(path, lpPathName);
 
-    BOOL ret = Old_RemoveDirectoryW(lpPathName);
+    ret = Old_RemoveDirectoryW(lpPathName);
 	LOQ_bool("filesystem", "u", "DirectoryName", path);
 
 	free(path);
@@ -522,10 +552,11 @@ HOOKDEF(BOOL, WINAPI, MoveFileWithProgressW,
     __in      DWORD dwFlags
 ) {
 	wchar_t *path = malloc(32768 * sizeof(wchar_t));
+	BOOL ret;
 
 	ensure_absolute_unicode_path(path, lpExistingFileName);
 
-    BOOL ret = Old_MoveFileWithProgressW(lpExistingFileName, lpNewFileName,
+    ret = Old_MoveFileWithProgressW(lpExistingFileName, lpNewFileName,
         lpProgressRoutine, lpData, dwFlags);
 	LOQ_bool("filesystem", "uFh", "ExistingFileName", path,
         "NewFileName", lpNewFileName, "Flags", dwFlags);
@@ -627,12 +658,13 @@ HOOKDEF(BOOL, WINAPI, DeleteFileA,
     __in  LPCSTR lpFileName
 ) {
 	char path[MAX_PATH];
+	BOOL ret;
 
 	ensure_absolute_ascii_path(path, lpFileName);
 	
 	pipe("FILE_DEL:%z", path);
 
-    BOOL ret = Old_DeleteFileA(lpFileName);
+    ret = Old_DeleteFileA(lpFileName);
 	LOQ_bool("filesystem", "s", "FileName", path);
 
     return ret;
@@ -642,6 +674,7 @@ HOOKDEF(BOOL, WINAPI, DeleteFileW,
     __in  LPWSTR lpFileName
 ) {
 	wchar_t *path = malloc(32768 * sizeof(wchar_t));
+	BOOL ret;
 
 	if (path) {
 		ensure_absolute_unicode_path(path, lpFileName);
@@ -649,7 +682,7 @@ HOOKDEF(BOOL, WINAPI, DeleteFileW,
 		pipe("FILE_DEL:%Z", path);
 	}
 
-    BOOL ret = Old_DeleteFileW(lpFileName);
+    ret = Old_DeleteFileW(lpFileName);
 	if (path) {
 		LOQ_bool("filesystem", "u", "FileName", path);
 		free(path);
@@ -714,7 +747,8 @@ HOOKDEF(BOOL, WINAPI, GetVolumeNameForVolumeMountPointW,
 	BOOL ret = Old_GetVolumeNameForVolumeMountPointW(lpszVolumeMountPoint, lpszVolumeName, cchBufferLength);
 	LOQ_bool("filesystem", "uu", "VolumeMountPoint", lpszVolumeMountPoint, "VolumeName", lpszVolumeName);
 	if (ret && lpszVolumeName && cchBufferLength > 4) {
-		for (DWORD i = 0; i < cchBufferLength - 4; i++) {
+		DWORD i;
+		for (i = 0; i < cchBufferLength - 4; i++) {
 			if (!memcmp(&lpszVolumeName[i], L"QEMU", 8))
 				memcpy(&lpszVolumeName[i], L"DELL", 8);
 		}

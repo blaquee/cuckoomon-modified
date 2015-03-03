@@ -21,8 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <stddef.h>
 #include "ntapi.h"
-#include "capstone/include/capstone.h"
-#include "capstone/include/x86.h"
+#include <distorm.h>
 #include "hooking.h"
 #include "ignore.h"
 #include "unhook.h"
@@ -34,25 +33,18 @@ extern DWORD g_tls_hook_index;
 // do not change this number
 #define TLS_LAST_ERROR 0x34
 
-static csh capstone;
-
-void init_capstone(void)
-{
-	cs_open(CS_ARCH_X86, CS_MODE_32, &capstone);
-}
-
 // length disassembler engine
-int lde(void *addr)
+static int lde(void *addr)
 {
-    cs_insn *insn;
+	// the length of an instruction is 16 bytes max, but there can also be
+	// 16 instructions of length one, so.. we support "decomposing" 16
+	// instructions at once, max
+	unsigned int used_instruction_count; _DInst instructions[16];
+	_CodeInfo code_info = { 0, 0, addr, 16, Decode32Bits };
+	_DecodeResult ret = distorm_decompose(&code_info, instructions, 16,
+		&used_instruction_count);
 
-    size_t ret = cs_disasm(capstone, addr, 16, (uintptr_t) addr, 1, &insn);
-    if(ret == 0) return 0;
-
-    ret = insn->size;
-
-    cs_free(insn, 1);
-    return ret;
+	return ret == DECRES_SUCCESS ? instructions[0].size : 0;
 }
 
 // create a trampoline at the given address, that is, we are going to replace
@@ -91,6 +83,7 @@ static int hook_create_trampoline(unsigned char *addr, int len,
         // it's a (conditional) jump or call with 32bit relative offset
         if(*addr == 0xe9 || *addr == 0xe8 || (*addr == 0x0f &&
                 addr[1] >= 0x80 && addr[1] < 0x90)) {
+			unsigned long jmp_addr;
 
             // copy the jmp or call instruction (conditional jumps are two
             // bytes, the rest is one byte)
@@ -104,8 +97,7 @@ static int hook_create_trampoline(unsigned char *addr, int len,
             // calculated address, so that's our target address as well.
             // (note that `addr' is already increased by one or two, so the
             // 4 represents the 32bit offset of this particular instruction)
-            unsigned long jmp_addr = *(int *) addr + 4 +
-                (unsigned long) addr;
+            jmp_addr = *(int *) addr + 4 + (unsigned long) addr;
             addr += 4;
 
             // trampoline is already filled with the opcode itself (the jump
@@ -461,6 +453,10 @@ hook_data_t *alloc_hookdata_near(void *addr)
 
 int hook_api(hook_t *h, int type)
 {
+	unsigned char *addr;
+	int ret = -1;
+	DWORD old_protect;
+
     // table with all possible hooking types
     static struct {
         int(*hook)(hook_t *h, unsigned char *from, unsigned char *to);
@@ -492,7 +488,7 @@ int hook_api(hook_t *h, int type)
     }
 
     // resolve the address to hook
-    unsigned char *addr = h->addr;
+    addr = h->addr;
 
     if(addr == NULL && h->library != NULL && h->funcname != NULL) {
         addr = (unsigned char *) GetProcAddress(GetModuleHandleW(h->library),
@@ -502,8 +498,6 @@ int hook_api(hook_t *h, int type)
 		// function doesn't exist in this DLL, not a critical error
 		return 0;
     }
-
-	int ret = -1;
 
 	// windows 7 has a DLL called kernelbase.dll which basically acts
 	// as a layer between the program and kernel32 (and related?) it
@@ -558,8 +552,6 @@ int hook_api(hook_t *h, int type)
 		pipe("WARNING: Provided invalid hook type: %d", type);
 		return ret;
 	}
-
-	DWORD old_protect;
 
 	// make the address writable
 	if (VirtualProtect(addr, hook_types[type].len, PAGE_EXECUTE_READWRITE,

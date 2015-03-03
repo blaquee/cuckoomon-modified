@@ -93,9 +93,10 @@ HOOKDEF(NTSTATUS, WINAPI, LdrLoadDll,
     __in        PUNICODE_STRING ModuleFileName,
     __out       PHANDLE ModuleHandle
 ) {
+	NTSTATUS ret;
     COPY_UNICODE_STRING(library, ModuleFileName);
 
-    NTSTATUS ret = Old_LdrLoadDll(PathToFile, Flags, ModuleFileName,
+    ret = Old_LdrLoadDll(PathToFile, Flags, ModuleFileName,
         ModuleHandle);
     LOQ_ntstatus("system", "hoP", "Flags", Flags, "FileName", &library,
         "BaseAddress", ModuleHandle);
@@ -154,7 +155,8 @@ HOOKDEF(BOOL, WINAPI, DeviceIoControl,
 	}
 	/* fake model name */
 	if (ret && dwIoControlCode == IOCTL_STORAGE_QUERY_PROPERTY && lpOutBuffer && nOutBufferSize > 4) {
-		for (ULONG i = 0; i < nOutBufferSize - 4; i++) {
+		ULONG i;
+		for (i = 0; i < nOutBufferSize - 4; i++) {
 			if (!memcmp(&((PCHAR)lpOutBuffer)[i], "QEMU", 4))
 				memcpy(&((PCHAR)lpOutBuffer)[i], "DELL", 4);
 		}
@@ -302,11 +304,12 @@ HOOKDEF(int, WINAPI, GetSystemMetrics,
     return ret;
 }
 
+static LARGE_INTEGER last_skipped;
+
 HOOKDEF(BOOL, WINAPI, GetCursorPos,
     _Out_ LPPOINT lpPoint
 ) {
     BOOL ret = Old_GetCursorPos(lpPoint);
-	static LARGE_INTEGER last_skipped = { .QuadPart = 0ULL };
 
 	/* work around the fact that skipping sleeps prevents the human module from making the system look active */
 	if (lpPoint && time_skipped.QuadPart != last_skipped.QuadPart) {
@@ -394,5 +397,21 @@ HOOKDEF(SHORT, WINAPI, GetAsyncKeyState,
 		asynckeystate_logcount++;
 		LOQ_nonzero("windows", "is", "KeyCode", vKey, "Status", "Log limit reached");
 	}
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, RtlDecompressBuffer,
+	__in USHORT CompressionFormat,
+	__out PUCHAR UncompressedBuffer,
+	__in ULONG UncompressedBufferSize,
+	__in PUCHAR CompressedBuffer,
+	__in ULONG CompressedBufferSize,
+	__out PULONG FinalUncompressedSize
+) {
+	NTSTATUS ret = Old_RtlDecompressBuffer(CompressionFormat, UncompressedBuffer, UncompressedBufferSize,
+		CompressedBuffer, CompressedBufferSize, FinalUncompressedSize);
+
+	LOQ_ntstatus("misc", "b", "UncompressedBuffer", ret ? 0 : *FinalUncompressedSize, UncompressedBuffer);
+
 	return ret;
 }

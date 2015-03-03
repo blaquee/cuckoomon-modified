@@ -20,8 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <stddef.h>
 #include "ntapi.h"
-#include "capstone/include/capstone.h"
-#include "capstone/include/x86.h"
+#include <distorm.h>
 #include "hooking.h"
 #include "ignore.h"
 #include "unhook.h"
@@ -33,39 +32,38 @@ extern DWORD g_tls_hook_index;
 // do not change this number
 #define TLS_LAST_ERROR 0x34
 
-static csh capstone;
-
-void init_capstone(void)
+// length disassembler engine
+static int lde(void *addr)
 {
-	cs_open(CS_ARCH_X86, CS_MODE_64, &capstone);
-	cs_option(capstone, CS_OPT_DETAIL, CS_OPT_ON);
+	// the length of an instruction is 16 bytes max, but there can also be
+	// 16 instructions of length one, so.. we support "decomposing" 16
+	// instructions at once, max
+	unsigned int used_instruction_count; _DInst instructions[16];
+	_CodeInfo code_info = { 0, 0, addr, 16, Decode64Bits };
+	_DecodeResult ret = distorm_decompose(&code_info, instructions, 16,
+		&used_instruction_count);
+
+	return ret == DECRES_SUCCESS ? instructions[0].size : 0;
 }
 
-int lde(void *addr)
+
+static _DInst *get_insn(void *addr)
 {
-	cs_insn *insn;
-
-	size_t ret = cs_disasm(capstone, addr, 16, (uintptr_t)addr, 1, &insn);
-	if (ret == 0) return 0;
-
-	ret = insn->size;
-
-	cs_free(insn, 1);
-	return (int)ret;
+	unsigned int used_instruction_count; _DInst instructions[16];
+	_CodeInfo code_info = { 0, 0, addr, 16, Decode64Bits };
+	_DecodeResult ret = distorm_decompose(&code_info, instructions, 16,
+		&used_instruction_count);
+	if (ret == DECRES_SUCCESS) {
+		_DInst *insn = malloc(sizeof(_DInst));
+		memcpy(insn, &instructions[0], sizeof(_DInst));
+		return insn;
+	}
+	return NULL;
 }
 
-cs_insn *get_insn(void *addr)
+static void put_insn(_DInst *insn)
 {
-	cs_insn *insn;
-	size_t ret = cs_disasm(capstone, addr, 16, (uintptr_t)addr, 1, &insn);
-	if (ret == 0)
-		return NULL;
-	return insn;
-}
-
-put_insn(cs_insn *insn)
-{
-	cs_free(insn, 1);
+	free(insn);
 }
 
 static unsigned char *emit_indirect_jmp(unsigned char *buf, ULONG_PTR addr)
@@ -122,7 +120,7 @@ static ULONG_PTR get_near_rel_target(unsigned char *buf)
 	else if (buf[0] == 0x0f && buf[1] >= 0x80 && buf[1] < 0x90)
 		return (ULONG_PTR)buf + 6 + *(int *)&buf[2];
 
-	assert(false);
+	assert(0);
 	return 0;
 }
 
@@ -131,7 +129,7 @@ static ULONG_PTR get_short_rel_target(unsigned char *buf)
 	if (buf[0] == 0xeb || buf[0] == 0xe3 || (buf[0] >= 0x70 && buf[0] < 0x80))
 		return (ULONG_PTR)buf + 2 + *(char *)&buf[1];
 
-	assert(false);
+	assert(0);
 	return 0;
 }
 
@@ -160,10 +158,10 @@ static int addr_is_in_range(ULONG_PTR addr, const unsigned char *buf, DWORD size
 	return 0;
 }
 
-static void retarget_rip_relative_displacement(unsigned char **tramp, unsigned char **addr, cs_insn *insn)
+static void retarget_rip_relative_displacement(unsigned char **tramp, unsigned char **addr, _DInst *insn)
 {
 	unsigned short length = insn->size;
-	unsigned char offset = (unsigned char)(length - insn->detail->x86.imm_encoded_size - sizeof(int));
+	unsigned char offset = (unsigned char)(length - insn->imm_encoded_size - sizeof(int));
 	unsigned char *newtramp = *tramp;
 	unsigned char *newaddr = *addr;
 	ULONG_PTR target;
@@ -175,7 +173,7 @@ static void retarget_rip_relative_displacement(unsigned char **tramp, unsigned c
 	}
 	// now replace the displacement
 	rel = (int)(target - (ULONG_PTR)newtramp);
-	*(int *)(newtramp - insn->detail->x86.imm_encoded_size - sizeof(int)) = rel;
+	*(int *)(newtramp - insn->imm_encoded_size - sizeof(int)) = rel;
 
 	*tramp = newtramp;
 	*addr = newaddr;
@@ -198,17 +196,19 @@ static int hook_create_trampoline(unsigned char *addr, int len,
 	const unsigned char *origaddr = addr;
 	unsigned char insnidx = 0;
 	int stoleninstrlen = 0;
-	cs_insn *insn;
+	_DInst *insn;
 
 	memset(&addrmap, 0, sizeof(addrmap));
 
 	// our trampoline should contain at least enough bytes to fit the given
 	// length
 	while (len > 0) {
+		int length;
+
 		insn = get_insn(addr);
 		if (insn == NULL)
 			goto error;
-		int length = insn->size;
+		length = insn->size;
 
 		// how many bytes left?
 		len -= length;
@@ -223,7 +223,7 @@ static int hook_create_trampoline(unsigned char *addr, int len,
 		// trampoline
 
 		if (addr[0] == 0xe8 || addr[0] == 0xe9 || (addr[0] == 0x0f && addr[1] >= 0x80 && addr[1] < 0x90) ||
-			((insn->detail->x86.modrm & 0xc7) == 5)) {
+			(insn->flags & FLAG_RIP_RELATIVE)) {
 			retarget_rip_relative_displacement(&tramp, &addr, insn);
 			if (addr[0] == 0xe9 && len > 0)
 				goto error;
@@ -289,6 +289,11 @@ static void hook_create_pre_tramp(hook_t *h)
 {
 	unsigned char *p;
 	unsigned int off;
+	RUNTIME_FUNCTION *functable;
+	UNWIND_INFO *unwindinfo;
+	BYTE regs1[] = { 11, 10, 9, 8 };
+	BYTE regs2[] = { 3, 2, 1, 0 };
+	int i;
 
 	unsigned char pre_tramp1[] = {
 #if DISABLE_HOOK_CONTENT
@@ -376,8 +381,8 @@ static void hook_create_pre_tramp(hook_t *h)
 	   times with the same pointer value, you'll end up with completely broken unwind information that fails
 	   in spectacular ways.
 	 */
-	RUNTIME_FUNCTION *functable = malloc(sizeof(RUNTIME_FUNCTION));
-	UNWIND_INFO *unwindinfo = &h->hookdata->unwind_info;
+	functable = malloc(sizeof(RUNTIME_FUNCTION));
+	unwindinfo = &h->hookdata->unwind_info;
 
 	functable->BeginAddress = offsetof(hook_data_t, pre_tramp);
 	functable->EndAddress = offsetof(hook_data_t, pre_tramp) + sizeof(h->hookdata->pre_tramp);
@@ -394,16 +399,13 @@ static void hook_create_pre_tramp(hook_t *h)
 	unwindinfo->UnwindCode[0].CodeOffset = 38;
 	unwindinfo->UnwindCode[0].OpInfo = 4; // (4 + 1) * 8 = 0x28
 
-	BYTE regs1[] = { 11, 10, 9, 8 };
-	BYTE regs2[] = { 3, 2, 1, 0 };
-
-	for (int i = 0; i < ARRAYSIZE(regs1); i++) {
+	for (i = 0; i < ARRAYSIZE(regs1); i++) {
 		unwindinfo->UnwindCode[1 + i].UnwindOp = UWOP_PUSH_NONVOL;
 		unwindinfo->UnwindCode[1 + i].CodeOffset = 12 - (2 * i);
 		unwindinfo->UnwindCode[1 + i].OpInfo = regs1[i];
 	}
 
-	for (int i = 0; i < ARRAYSIZE(regs2); i++) {
+	for (i = 0; i < ARRAYSIZE(regs2); i++) {
 		unwindinfo->UnwindCode[5 + i].UnwindOp = UWOP_PUSH_NONVOL;
 		unwindinfo->UnwindCode[5 + i].CodeOffset = 4 - i;
 		unwindinfo->UnwindCode[5 + i].OpInfo = regs2[i];
@@ -457,6 +459,10 @@ hook_data_t *alloc_hookdata_near(void *addr)
 
 int hook_api(hook_t *h, int type)
 {
+	DWORD old_protect;
+	int ret = -1;
+	unsigned char *addr;
+	OSVERSIONINFO os_info;
 	// table with all possible hooking types
 	static struct {
 		int(*hook)(hook_t *h, unsigned char *from, unsigned char *to);
@@ -472,7 +478,7 @@ int hook_api(hook_t *h, int type)
 	}
 
 	// resolve the address to hook
-	unsigned char *addr = h->addr;
+	addr = h->addr;
 
 	if (addr == NULL && h->library != NULL && h->funcname != NULL) {
 		addr = (unsigned char *)GetProcAddress(GetModuleHandleW(h->library),
@@ -483,9 +489,8 @@ int hook_api(hook_t *h, int type)
 		return 0;
 	}
 
-	int ret = -1;
-
-	OSVERSIONINFO os_info = { sizeof(OSVERSIONINFO) };
+	memset(&os_info, 0, sizeof(os_info));
+	os_info.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
 	if (GetVersionEx(&os_info) && os_info.dwMajorVersion >= 6) {
 		if (addr[0] == 0xeb) {
 			PUCHAR target = (PUCHAR)get_short_rel_target(addr);
@@ -507,6 +512,7 @@ int hook_api(hook_t *h, int type)
 		}
 	}
 
+	/*
 	if (!wcscmp(h->library, L"ntdll") && !memcmp(addr, "\x4c\x8b\xd1\xb8", 4)) {
 		// hooking a native API, leave in the mov eax, <syscall nr> instruction
 		// as some malware depends on this for direct syscalls
@@ -514,14 +520,13 @@ int hook_api(hook_t *h, int type)
 		// at all
 		type = HOOK_NATIVE_JMP_INDIRECT;
 	}
+	*/
 
 	// check if this is a valid hook type
 	if (type < 0 && type >= ARRAYSIZE(hook_types)) {
 		pipe("WARNING: Provided invalid hook type: %d", type);
 		return ret;
 	}
-
-	DWORD old_protect;
 
 	// make the address writable
 	if (VirtualProtect(addr, hook_types[type].len, PAGE_EXECUTE_READWRITE,

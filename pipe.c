@@ -22,8 +22,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "pipe.h"
 #include "utf8.h"
 #include "misc.h"
-
-const char *g_pipe_name;
+#include "config.h"
+#include "log.h"
 
 static int _pipe_utf8x(char **out, unsigned short x)
 {
@@ -116,10 +116,12 @@ static int _pipe_sprintf(char *out, const char *fmt, va_list args)
         }
         else if(*fmt == 'O') {
             OBJECT_ATTRIBUTES *obj = va_arg(args, OBJECT_ATTRIBUTES *);
+			wchar_t path[MAX_PATH_PLUS_TOLERANCE];
+			wchar_t *absolutepath;
+
             if(obj == NULL || obj->ObjectName == NULL) return -1;
 
-            wchar_t path[MAX_PATH_PLUS_TOLERANCE];
-			wchar_t *absolutepath = malloc(32768 * sizeof(wchar_t));
+			absolutepath = malloc(32768 * sizeof(wchar_t));
 			if (absolutepath) {
 				path_from_object_attributes(obj, path, (unsigned int)MAX_PATH_PLUS_TOLERANCE);
 
@@ -167,6 +169,9 @@ int pipe(const char *fmt, ...)
 	va_start(args, fmt);
 
 	get_lasterrors(&lasterror);
+
+	log_flush();
+
 	len = _pipe_sprintf(NULL, fmt, args);
     if (len > 0) {
         char *buf = calloc(1, len + 1);
@@ -182,7 +187,7 @@ int pipe(const char *fmt, ...)
 			ret = 0;
 		}
 #else
-		if (CallNamedPipe(g_pipe_name, buf, len, buf, len,
+		if (CallNamedPipe(g_config.pipe_name, buf, len, buf, len,
 			(unsigned long *)&len, NMPWAIT_WAIT_FOREVER) != 0)
 			ret = 0;
 #endif
@@ -199,15 +204,16 @@ int pipe(const char *fmt, ...)
 int pipe2(void *out, int *outlen, const char *fmt, ...)
 {
     va_list args;
-    va_start(args, fmt);
-    int len = _pipe_sprintf(NULL, fmt, args);
+	int len;
 	int ret = -1;
+    va_start(args, fmt);
+    len = _pipe_sprintf(NULL, fmt, args);
     if(len > 0) {
         char *buf = calloc(1, len + 1);
         _pipe_sprintf(buf, fmt, args);
         va_end(args);
 
-        if(CallNamedPipe(g_pipe_name, buf, len, out, *outlen,
+        if(CallNamedPipe(g_config.pipe_name, buf, len, out, *outlen,
                 (DWORD *) outlen, NMPWAIT_WAIT_FOREVER) != 0)
             ret = 0;
 		free(buf);

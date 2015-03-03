@@ -19,8 +19,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <stddef.h>
 #include "ntapi.h"
-#include "capstone/include/capstone.h"
-#include "capstone/include/x86.h"
 #include "hooking.h"
 #include "ignore.h"
 #include "unhook.h"
@@ -107,6 +105,7 @@ hook_info_t *hook_info()
 		// this wizardry allows us to hook NtAllocateVirtualMemory -- otherwise we'd crash from infinite
 		// recursion if NtAllocateVirtualMemory was the first API we saw on a new thread
 		char dummybuf[sizeof(hook_info_t)] = { 0 };
+		hook_info_t *newinfo;
 
 		hook_info_t *info = (hook_info_t *)&dummybuf;
 		TlsSetValue(g_tls_hook_index, info);
@@ -115,7 +114,7 @@ hook_info_t *hook_info()
 		// shouldn't need to do the disable_count thanks to the new call stack inspection, but
 		// it doesn't hurt
 		info->disable_count++;
-		hook_info_t *newinfo = (hook_info_t *)calloc(1, sizeof(hook_info_t));
+		newinfo = (hook_info_t *)calloc(1, sizeof(hook_info_t));
 		info->disable_count--;
 
 		TlsSetValue(g_tls_hook_index, newinfo);

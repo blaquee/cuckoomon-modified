@@ -23,6 +23,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "log.h"
 #include "misc.h"
 #include "config.h"
+#include <Sddl.h>
 
 #define UNHOOK_MAXCOUNT 2048
 #define UNHOOK_BUFSIZE 256
@@ -73,11 +74,12 @@ void unhook_detect_add_region(const char *funcname, uint8_t *addr,
 void restore_hooks_on_range(ULONG_PTR start, ULONG_PTR end)
 {
 	lasterror_t lasterror;
+	uint32_t idx;
 
 	get_lasterrors(&lasterror);
 
 	__try {
-		for (uint32_t idx = 0; idx < g_index; idx++) {
+		for (idx = 0; idx < g_index; idx++) {
 			if ((ULONG_PTR)g_addr[idx] < start || ((ULONG_PTR)g_addr[idx] + g_length[idx]) > end)
 				continue;
 			if (!memcmp(g_orig[idx], g_addr[idx], g_length[idx])) {
@@ -97,6 +99,7 @@ void restore_hooks_on_range(ULONG_PTR start, ULONG_PTR end)
 static DWORD WINAPI _unhook_detect_thread(LPVOID param)
 {
     static int watcher_first = 1;
+	uint32_t idx;
 
     hook_disable();
 
@@ -113,7 +116,7 @@ static DWORD WINAPI _unhook_detect_thread(LPVOID param)
             raw_sleep(100);
         }
 
-		for (uint32_t idx = 0; idx < g_index; idx++) {
+		for (idx = 0; idx < g_index; idx++) {
 			if (g_hook_reported[idx] == 0) {
 				char *tmpbuf = NULL;
 				if (!is_valid_address_range((ULONG_PTR)g_addr[idx], g_length[idx])) {
@@ -131,7 +134,7 @@ static DWORD WINAPI _unhook_detect_thread(LPVOID param)
 					if (!memcmp(g_orig[idx], g_addr[idx], g_length[idx]))
 						is_modification = 0;
 
-					if (is_shutting_down() == 2) {
+					if (is_shutting_down() == 0) {
 						if (is_modification) {
 							char *tmpbuf2;
 							tmpbuf2 = tmpbuf = malloc(g_length[idx]);
@@ -205,7 +208,14 @@ static DWORD WINAPI _terminate_event_thread(LPVOID param)
 
 int terminate_event_init()
 {
-	g_terminate_event_handle = CreateEventA(NULL, FALSE, FALSE, g_config.terminate_event_name);
+	SECURITY_DESCRIPTOR sd;
+	SECURITY_ATTRIBUTES sa;
+	InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+	SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+	sa.bInheritHandle = FALSE;
+	sa.lpSecurityDescriptor = &sd;
+	g_terminate_event_handle = CreateEventA(&sa, FALSE, FALSE, g_config.terminate_event_name);
 
 	g_terminate_event_thread_handle =
 		CreateThread(NULL, 0, &_terminate_event_thread, NULL, 0, NULL);
@@ -250,6 +260,9 @@ static DWORD WINAPI _watchdog_thread(LPVOID param)
 {
 	while (1) {
 		char msg[1024];
+		char *dllname;
+		unsigned int off = 0;
+		int i;
 
 		CONTEXT ctx;
 		raw_sleep(1000);
@@ -259,13 +272,12 @@ static DWORD WINAPI _watchdog_thread(LPVOID param)
 		SuspendThread((HANDLE)param);
 		ctx.ContextFlags = CONTEXT_FULL;
 		GetThreadContext((HANDLE)param, &ctx);
-		unsigned int off = 0;
-		char *dllname = convert_address_to_dll_name_and_offset(ctx.Eip, &off);
+		dllname = convert_address_to_dll_name_and_offset(ctx.Eip, &off);
 		sprintf(msg, "INFO: PID %u thread: %p EIP: %s+%x(%p) EAX: %p EBX: %p ECX: %p EDX: %p ESI: %p EDI: %p EBP: %p ESP: %p\n", GetCurrentProcessId(), param, dllname ? dllname : "", off, ctx.Eip, ctx.Eax, ctx.Ebx, ctx.Ecx, ctx.Edx, ctx.Esi, ctx.Edi, ctx.Ebp, ctx.Esp);
 
 		_operate_on_backtrace(ctx.Eip, ctx.Ebp, find_cuckoomon_addrs);
 
-		for (int i = 0; i < cuckoomonaddrs_num; i++) {
+		for (i = 0; i < cuckoomonaddrs_num; i++) {
 			char *dllname2 = convert_address_to_dll_name_and_offset(cuckoomonaddrs[i], &off);
 			sprintf(msg + strlen(msg), " %s+%x(%p)", dllname2 ? dllname2 : "", off, cuckoomonaddrs[i]);
 			if (dllname2)

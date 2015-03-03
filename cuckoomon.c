@@ -288,6 +288,7 @@ static hook_t g_hooks[] = {
     HOOK(advapi32, GetUserNameW),
 	HOOK(user32, GetAsyncKeyState),
 	HOOK(ntdll, NtLoadDriver),
+	HOOK(ntdll, RtlDecompressBuffer),
 	
 	//
     // Network Hooks
@@ -425,7 +426,8 @@ static hook_t g_hooks[] = {
 
 void set_hooks_dll(const wchar_t *library)
 {
-    for (int i = 0; i < ARRAYSIZE(g_hooks); i++) {
+	int i;
+    for (i = 0; i < ARRAYSIZE(g_hooks); i++) {
         if(!wcsicmp(g_hooks[i].library, library)) {
 			if (hook_api(&g_hooks[i], HOOKTYPE) < 0)
 				pipe("WARNING:Unable to hook %z", g_hooks[i].funcname);
@@ -435,10 +437,6 @@ void set_hooks_dll(const wchar_t *library)
 
 void set_hooks()
 {
-    // the hooks contain executable code as well, so they have to be RWX
-    DWORD old_protect;
-    VirtualProtect(g_hooks, sizeof(g_hooks), PAGE_EXECUTE_READWRITE,
-        &old_protect);
 
 	// before modifying any DLLs, let's first freeze all other threads in our process
 	// otherwise our racy modifications can cause the task to crash prematurely
@@ -451,6 +449,12 @@ void set_hooks()
 	THREADENTRY32 threadInfo;
 	DWORD our_tid = GetCurrentThreadId();
 	DWORD our_pid = GetCurrentProcessId();
+	// the hooks contain executable code as well, so they have to be RWX
+	DWORD old_protect;
+	VirtualProtect(g_hooks, sizeof(g_hooks), PAGE_EXECUTE_READWRITE,
+		&old_protect);
+
+
 	memset(&threadInfo, 0, sizeof(threadInfo));
 	threadInfo.dwSize = sizeof(threadInfo);
 
@@ -469,7 +473,7 @@ void set_hooks()
 	} while (Thread32Next(hSnapShot, &threadInfo));
 
     // now, hook each api :)
-    for (int i = 0; i < ARRAYSIZE(g_hooks); i++) {
+    for (i = 0; i < ARRAYSIZE(g_hooks); i++) {
 		//pipe("INFO:Hooking %z", g_hooks[i].funcname);
 		if (hook_api(&g_hooks[i], HOOKTYPE) < 0)
 			pipe("WARNING:Unable to hook %z", g_hooks[i].funcname);
@@ -647,9 +651,10 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 
 		init_private_heap();
 
-		init_capstone();
-
 		set_os_bitness();
+
+		// initialize file stuff, needs to be performed prior to any file normalization
+		file_init();
 
 		get_our_process_path();
 
@@ -674,9 +679,6 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
         hide_module_from_peb(hModule);
 #endif
 
-        // initialize file stuff
-        file_init();
-
         // read the config settings
 		if (!read_config())
 #if CUCKOODBG
@@ -685,8 +687,6 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 			// if we're not debugging, then failure to read the cuckoomon config should be a critical error
 			goto out;
 #endif
-        g_pipe_name = g_config.pipe_name;
-
 		// obtain all protected pids
         pipe2(pids, &length, "GETPIDS");
         for (i = 0; i < length / sizeof(pids[0]); i++) {
