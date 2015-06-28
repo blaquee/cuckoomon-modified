@@ -25,8 +25,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "config.h"
 #include <Sddl.h>
 
-#define UNHOOK_MAXCOUNT 2048
-#define UNHOOK_BUFSIZE 256
+#define UNHOOK_MAXCOUNT 1024
+#define UNHOOK_BUFSIZE 32
 
 static HANDLE g_unhook_thread_handle, g_watcher_thread_handle;
 
@@ -46,10 +46,21 @@ static char g_funcname[UNHOOK_MAXCOUNT][64];
 static uint8_t g_orig[UNHOOK_MAXCOUNT][UNHOOK_BUFSIZE];
 
 // The contents of this region after we modified it.
-static uint8_t g_our[UNHOOK_BUFSIZE][UNHOOK_BUFSIZE];
+static uint8_t g_our[UNHOOK_MAXCOUNT][UNHOOK_BUFSIZE];
 
 // If the region has been modified, did we report this already?
 static uint8_t g_hook_reported[UNHOOK_MAXCOUNT];
+
+int address_already_hooked(uint8_t *addr)
+{
+	uint32_t idx;
+
+	for (idx = 0; idx < g_index; idx++)
+		if (addr == g_addr[idx])
+			return 1;
+
+	return 0;
+}
 
 void unhook_detect_add_region(const char *funcname, uint8_t *addr,
     const uint8_t *orig, const uint8_t *our, uint32_t length)
@@ -59,11 +70,14 @@ void unhook_detect_add_region(const char *funcname, uint8_t *addr,
         return;
     }
 
+	if (address_already_hooked(addr))
+		return;
+
     g_length[g_index] = length;
     g_addr[g_index] = addr;
 
     if(funcname != NULL) {
-        strcpy(g_funcname[g_index], funcname);
+        strncpy(g_funcname[g_index], funcname, sizeof(g_funcname[g_index]) - 1);
     }
 
     memcpy(g_orig[g_index], orig, MIN(length, UNHOOK_BUFSIZE));
@@ -108,8 +122,7 @@ static DWORD WINAPI _unhook_detect_thread(LPVOID param)
                 500) != WAIT_TIMEOUT) {
             if(watcher_first != 0) {
                 if(is_shutting_down() == 0) {
-                    log_anomaly("unhook", 1, NULL,
-                        "Unhook watcher thread has been corrupted!");
+                    log_anomaly("unhook", "Unhook watcher thread has been corrupted!");
                 }
                 watcher_first = 0;
             }
@@ -168,19 +181,21 @@ static DWORD WINAPI _unhook_watch_thread(LPVOID param)
     while (WaitForSingleObject(g_unhook_thread_handle, 1000) == WAIT_TIMEOUT);
 
     if(is_shutting_down() == 0) {
-        log_anomaly("unhook", 1, NULL,
-            "Unhook detection thread has been corrupted!");
+        log_anomaly("unhook", "Unhook detection thread has been corrupted!");
     }
     return 0;
 }
 
+DWORD g_unhook_detect_thread_id;
+DWORD g_unhook_watcher_thread_id;
+
 int unhook_init_detection()
 {
     g_unhook_thread_handle =
-        CreateThread(NULL, 0, &_unhook_detect_thread, NULL, 0, NULL);
+		CreateThread(NULL, 0, &_unhook_detect_thread, NULL, 0, &g_unhook_detect_thread_id);
 
     g_watcher_thread_handle =
-        CreateThread(NULL, 0, &_unhook_watch_thread, NULL, 0, NULL);
+		CreateThread(NULL, 0, &_unhook_watch_thread, NULL, 0, &g_unhook_watcher_thread_id);
 
     if(g_unhook_thread_handle != NULL && g_watcher_thread_handle != NULL) {
         return 0;
@@ -205,6 +220,7 @@ static DWORD WINAPI _terminate_event_thread(LPVOID param)
 	return 0;
 }
 
+DWORD g_terminate_event_thread_id;
 
 int terminate_event_init()
 {
@@ -218,7 +234,7 @@ int terminate_event_init()
 	g_terminate_event_handle = CreateEventA(&sa, FALSE, FALSE, g_config.terminate_event_name);
 
 	g_terminate_event_thread_handle =
-		CreateThread(NULL, 0, &_terminate_event_thread, NULL, 0, NULL);
+		CreateThread(NULL, 0, &_terminate_event_thread, NULL, 0, &g_terminate_event_thread_id);
 
 	if (g_terminate_event_handle != NULL && g_terminate_event_thread_handle != NULL)
 		return 0;
@@ -226,6 +242,8 @@ int terminate_event_init()
 	pipe("CRITICAL:Error initializing terminate event thread!");
 	return -1;
 }
+
+DWORD g_watchdog_thread_id;
 
 #ifndef _WIN64
 static ULONG_PTR cuckoomonaddrs[20];
@@ -297,7 +315,7 @@ int init_watchdog()
 
 	DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &mainthreadhandle, THREAD_ALL_ACCESS, FALSE, 0);
 
-	CreateThread(NULL, 0, &_watchdog_thread, mainthreadhandle, 0, NULL);
+	CreateThread(NULL, 0, &_watchdog_thread, mainthreadhandle, 0, &g_watchdog_thread_id);
 
 	return 0;
 }

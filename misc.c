@@ -89,6 +89,261 @@ void num_to_string(char *buf, unsigned int buflen, unsigned int num)
 	buf[i] = '\0';
 }
 
+unsigned short our_htons(unsigned short num)
+{
+	return (num >> 8) | ((num & 0xFF) << 8);
+}
+
+unsigned int our_htonl(unsigned int num)
+{
+	return (num >> 24) | ((num & 0x00FF0000) >> 8) | ((num & 0x0000FF00) << 8) | ((num & 0xFF) << 24);
+}
+
+void addr_to_string(const IN_ADDR addr, char *string)
+{
+	const unsigned char *chunk = (const unsigned char *)&addr;
+	string[0] = '\0';
+	num_to_string(string, 4, chunk[0]);
+	strcat(string, ".");
+	num_to_string(string+strlen(string), 4, chunk[1]);
+	strcat(string, ".");
+	num_to_string(string+strlen(string), 4, chunk[2]);
+	strcat(string, ".");
+	num_to_string(string+strlen(string), 4, chunk[3]);
+}
+
+void replace_string_in_buf(PCHAR buf, ULONG len, PCHAR findstr, PCHAR repstr)
+{
+	unsigned int findlen = (unsigned int)strlen(findstr);
+	unsigned int replen = (unsigned int)strlen(repstr);
+	ULONG i;
+
+	if ((findlen != replen) || len < findlen)
+		return;
+
+	for (i = 0; i <= len - findlen; i++) {
+		if (!memcmp(&buf[i], findstr, findlen)) {
+			memcpy(&buf[i], repstr, replen);
+			i += replen - 1;
+		}
+	}
+}
+
+void replace_ci_string_in_buf(PCHAR buf, ULONG len, PCHAR findstr, PCHAR repstr)
+{
+	unsigned int findlen = (unsigned int)strlen(findstr);
+	unsigned int replen = (unsigned int)strlen(repstr);
+	ULONG i;
+
+	if ((findlen != replen) || len < findlen)
+		return;
+
+	for (i = 0; i <= len - findlen; i++) {
+		if (!_strnicmp(&buf[i], findstr, findlen)) {
+			memcpy(&buf[i], repstr, replen);
+			i += replen - 1;
+		}
+	}
+}
+
+// len is in characters
+void replace_wstring_in_buf(PWCHAR buf, ULONG len, PWCHAR findstr, PWCHAR repstr)
+{
+	unsigned int findlen = (unsigned int)wcslen(findstr);
+	unsigned int replen = (unsigned int)wcslen(repstr);
+	ULONG i;
+
+	if ((findlen != replen) || len < findlen)
+		return;
+
+	for (i = 0; i <= len - findlen; i++) {
+		if (!memcmp(&buf[i], findstr, findlen * sizeof(wchar_t))) {
+			memcpy(&buf[i], repstr, replen * sizeof(wchar_t));
+			i += replen - 1;
+		}
+	}
+}
+
+void replace_ci_wstring_in_buf(PWCHAR buf, ULONG len, PWCHAR findstr, PWCHAR repstr)
+{
+	unsigned int findlen = (unsigned int)wcslen(findstr);
+	unsigned int replen = (unsigned int)wcslen(repstr);
+	ULONG i;
+
+	if ((findlen != replen) || len < findlen)
+		return;
+
+	for (i = 0; i <= len - findlen; i++) {
+		if (!_wcsnicmp(&buf[i], findstr, findlen)) {
+			memcpy(&buf[i], repstr, replen * sizeof(wchar_t));
+			i += replen - 1;
+		}
+	}
+}
+
+void perform_device_fakery(PVOID OutputBuffer, ULONG OutputBufferLength, ULONG IoControlCode)
+{
+	/* Fake harddrive size to 256GB */
+	if (OutputBufferLength >= sizeof(GET_LENGTH_INFORMATION) && IoControlCode == IOCTL_DISK_GET_LENGTH_INFO) {
+		((PGET_LENGTH_INFORMATION)OutputBuffer)->Length.QuadPart = 256060514304L;
+	}
+
+	if (OutputBufferLength >= sizeof(DISK_GEOMETRY) && IoControlCode == IOCTL_DISK_GET_DRIVE_GEOMETRY) {
+		PDISK_GEOMETRY geo = (PDISK_GEOMETRY)OutputBuffer;
+		geo->Cylinders.QuadPart = 31130;
+		geo->TracksPerCylinder = 255;
+		geo->BytesPerSector = 512;
+		geo->SectorsPerTrack = 63;
+	}
+
+	if (OutputBufferLength >= sizeof(DISK_GEOMETRY) && IoControlCode == IOCTL_DISK_GET_DRIVE_GEOMETRY_EX) {
+		PDISK_GEOMETRY_EX geo = (PDISK_GEOMETRY_EX)OutputBuffer;
+		geo->Geometry.Cylinders.QuadPart = 31130;
+		geo->Geometry.TracksPerCylinder = 255;
+		geo->Geometry.BytesPerSector = 512;
+		geo->Geometry.SectorsPerTrack = 63;
+		if (OutputBufferLength >= (sizeof(DISK_GEOMETRY) + sizeof(LARGE_INTEGER)))
+			geo->DiskSize.QuadPart = 256060514304L;
+	}
+
+	/* fake model name */
+	if (IoControlCode == IOCTL_STORAGE_QUERY_PROPERTY) {
+		replace_string_in_buf(OutputBuffer, OutputBufferLength, "QEMU", "DELL");
+		replace_string_in_buf(OutputBuffer, OutputBufferLength, "VBOX", "DELL");
+		replace_string_in_buf(OutputBuffer, OutputBufferLength, "VMware", "DELL__");
+		replace_string_in_buf(OutputBuffer, OutputBufferLength, "Virtual", "C300_BD");
+	}
+}
+
+void perform_ascii_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength)
+{
+	if (keypath == NULL || Data == NULL)
+		return;
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0\\Identifier")) {
+		replace_string_in_buf(Data, DataLength, "QEMU", "DELL");
+		replace_string_in_buf(Data, DataLength, "VMware", "DELL__");
+		replace_string_in_buf(Data, DataLength, "Virtual", "C300_BD");
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 1\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0\\Identifier")) {
+		replace_string_in_buf(Data, DataLength, "QEMU", "DELL");
+		replace_string_in_buf(Data, DataLength, "VMware", "DELL__");
+		replace_string_in_buf(Data, DataLength, "Virtual", "C300_BD");
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 2\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0\\Identifier")) {
+		replace_string_in_buf(Data, DataLength, "QEMU", "DELL");
+		replace_string_in_buf(Data, DataLength, "VMware", "DELL__");
+		replace_string_in_buf(Data, DataLength, "Virtual", "C300_BD");
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosVersion")) {
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\VideoBiosVersion")) {
+		replace_string_in_buf(Data, DataLength, "Oracle VM VirtualBox", "Intel VideoBios v1.3");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosDate")) {
+		replace_string_in_buf(Data, DataLength, "06/23/99", "01/01/02");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mssmbios\\Data\\AcpiData") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\mssmbios\\Data\\AcpiData")) {
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mssmbios\\Data\\SMBiosData") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\mssmbios\\Data\\SMBiosData")) {
+		replace_string_in_buf(Data, DataLength, "vbox", "DELL");
+		replace_string_in_buf(Data, DataLength, "VirtualBox", "Gigabyte__");
+		replace_string_in_buf(Data, DataLength, "innotek GmbH", "HP Pavillion");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__\\VBOXBIOS\\00000002\\00000000") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__\\VBOXFACP\\00000001\\00000000") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__\\VBOXRSDT\\00000001\\00000000")) {
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\Disk\\Enum\\0")) {
+		replace_string_in_buf(Data, DataLength, "QEMU", "DELL");
+		replace_string_in_buf(Data, DataLength, "VMware", "DELL__");
+		replace_string_in_buf(Data, DataLength, "Virtual", "C300_BD");
+	}
+
+	if (!wcsnicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor", 63) &&
+		!wcsicmp(keypath + wcslen(keypath) - wcslen(L"ProcessorNameString"), L"ProcessorNameString"))
+		replace_string_in_buf(Data, DataLength, "QEMU Virtual CPU version 2.0.0", "Intel(R) Core(TM) i7 CPU @3GHz");
+
+	// fake the manufacturer name
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Control\\SystemInformation\\SystemManufacturer"))
+		replace_string_in_buf(Data, DataLength, "QEMU", "DELL");
+}
+
+void perform_unicode_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength)
+{
+	if (keypath == NULL || Data == NULL)
+		return;
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0\\Identifier")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"QEMU", L"DELL");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VMware", L"DELL__");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"Virtual", L"C300_BD");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VBOX", L"DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosVersion")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VBOX", L"DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosDate")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"06/23/99", L"01/01/02");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\VideoBiosVersion")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"Oracle VM VirtualBox", L"Intel VideoBios v1.3");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mssmbios\\Data\\AcpiData") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\mssmbios\\Data\\AcpiData")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VBOX", L"DELL");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mssmbios\\Data\\SMBiosData") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\mssmbios\\Data\\SMBiosData")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"vbox", L"DELL");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VirtualBox", L"Gigabyte__");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"innotek GmbH", L"HP Pavillion");
+	}
+
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__\\VBOXBIOS\\00000002\\00000000") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__\\VBOXFACP\\00000001\\00000000") ||
+		!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__\\VBOXRSDT\\00000001\\00000000")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VBOX", L"DELL");
+	}
+	
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Services\\Disk\\Enum\\0")) {
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"QEMU", L"DELL");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VMware", L"DELL__");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"Virtual", L"C300_BD");
+	}
+
+	if (!wcsnicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor", 63) &&
+		!wcsicmp(keypath + wcslen(keypath) - wcslen(L"ProcessorNameString"), L"ProcessorNameString"))
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"QEMU Virtual CPU version 2.0.0", L"Intel(R) Core(TM) i7 CPU @3GHz");
+
+	// fake the manufacturer name
+	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Control\\SystemInformation\\SystemManufacturer"))
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"QEMU", L"DELL");
+}
+
+
 DWORD get_image_size(ULONG_PTR base)
 {
 	PIMAGE_DOS_HEADER doshdr = (PIMAGE_DOS_HEADER)base;
@@ -115,12 +370,13 @@ BOOLEAN is_valid_address_range(ULONG_PTR start, DWORD len)
 	return TRUE;
 }
 
-ULONG_PTR parent_process_id() // By Napalm @ NetCore2K (rohitab.com)
+DWORD parent_process_id() // By Napalm @ NetCore2K (rohitab.com)
 {
-    ULONG_PTR pbi[6]; ULONG ulSize = 0;
+	PROCESS_BASIC_INFORMATION pbi;
+    ULONG ulSize = 0;
 
     if(pNtQueryInformationProcess(GetCurrentProcess(), 0, &pbi, sizeof(pbi), &ulSize) >= 0 && ulSize == sizeof(pbi))
-        return pbi[5];
+        return (DWORD)pbi.ParentProcessId;
 
 	return 0;
 }
@@ -236,6 +492,15 @@ BOOL is_directory_objattr(const OBJECT_ATTRIBUTES *obj)
     return FALSE;
 }
 
+BOOL file_exists(const OBJECT_ATTRIBUTES *obj)
+{
+	FILE_BASIC_INFORMATION basic_information;
+	if (NT_SUCCESS(pNtQueryAttributesFile(obj, &basic_information)))
+		return TRUE;
+	return FALSE;
+}
+
+
 DWORD loaded_dlls;
 struct dll_range dll_ranges[MAX_DLLS];
 
@@ -343,11 +608,27 @@ void hide_module_from_peb(HMODULE module_handle)
             // like InLoadOrderModuleList etc
             CUT_LIST(mod->HashTableEntry);
 
-            memset(mod, 0, sizeof(LDR_MODULE));
+			memset(mod, 0, sizeof(LDR_MODULE));
             break;
         }
     }
 }
+
+PUNICODE_STRING get_basename_of_module(HMODULE module_handle)
+{
+	LDR_MODULE *mod; PEB *peb = (PEB *)get_peb();
+
+	for (mod = (LDR_MODULE *)peb->LoaderData->InLoadOrderModuleList.Flink;
+		mod->BaseAddress != NULL;
+		mod = (LDR_MODULE *)mod->InLoadOrderModuleList.Flink) {
+
+		if (mod->BaseAddress == module_handle)
+			return &mod->BaseDllName;
+	}
+
+	return NULL;
+}
+
 
 uint32_t path_from_handle(HANDLE handle,
     wchar_t *path, uint32_t path_buffer_len)
@@ -1046,4 +1327,162 @@ out:
 	set_lasterrors(&lasterror);
 
 	return ret;
+}
+
+// only 32-bit supported
+ULONG_PTR get_jseval_addr(HMODULE mod)
+{
+	PUCHAR buf = (PUCHAR)mod;
+	PIMAGE_DOS_HEADER doshdr;
+	PIMAGE_NT_HEADERS nthdr;
+	PIMAGE_SECTION_HEADER sechdr;
+	unsigned int numsecs, i;
+	PUCHAR start, end;
+	PUCHAR p;
+
+	doshdr = (PIMAGE_DOS_HEADER)buf;
+	nthdr = (PIMAGE_NT_HEADERS)(buf + doshdr->e_lfanew);
+	sechdr = (PIMAGE_SECTION_HEADER)((PUCHAR)&nthdr->OptionalHeader + nthdr->FileHeader.SizeOfOptionalHeader);
+	numsecs = nthdr->FileHeader.NumberOfSections;
+
+	for (i = 0; i < numsecs; i++) {
+		if (memcmp(sechdr[i].Name, ".text", 5))
+			continue;
+		start = buf + sechdr[i].VirtualAddress;
+		end = start + sechdr[i].Misc.VirtualSize;
+
+		for (p = start; p < end - 20; p++) {
+			if (!memcmp(p, L"eval code", 20)) {
+				PUCHAR evalcodestr = p;
+				// found string
+				// search for push <imm of eval code string>
+				for (p = start; p < end - 10; p++) {
+					if (p[0] == 0x68 && *(DWORD *)&p[1] == (DWORD)evalcodestr) {
+						PUCHAR jsevaladdr = p;
+						// found the push, now find the function prologue
+						while (jsevaladdr > (p - 0x1000) && jsevaladdr > start) {
+							if (!memcmp(jsevaladdr, "\x8b\xff\x55\x8b\xec", 5))
+								return (ULONG_PTR)jsevaladdr;
+							jsevaladdr--;
+						}
+						break;
+					}
+				}
+				break;
+			}
+		}
+		break;
+	}
+	return 0;
+}
+
+// only 32-bit supported
+ULONG_PTR get_olescript_compile_addr(HMODULE mod)
+{
+	PUCHAR buf = (PUCHAR)mod;
+	PIMAGE_DOS_HEADER doshdr;
+	PIMAGE_NT_HEADERS nthdr;
+	PIMAGE_SECTION_HEADER sechdr;
+	unsigned int numsecs, i;
+	PUCHAR start, end;
+	PUCHAR p;
+
+	doshdr = (PIMAGE_DOS_HEADER)buf;
+	nthdr = (PIMAGE_NT_HEADERS)(buf + doshdr->e_lfanew);
+	sechdr = (PIMAGE_SECTION_HEADER)((PUCHAR)&nthdr->OptionalHeader + nthdr->FileHeader.SizeOfOptionalHeader);
+	numsecs = nthdr->FileHeader.NumberOfSections;
+
+	for (i = 0; i < numsecs; i++) {
+		if (memcmp(sechdr[i].Name, ".text", 5))
+			continue;
+		start = buf + sechdr[i].VirtualAddress;
+		end = start + sechdr[i].Misc.VirtualSize;
+
+		for (p = start; p < end - 20; p++) {
+			if (!memcmp(p, L"eval code", 20)) {
+				PUCHAR evalcodestr = p;
+				// found string
+				// search for push <imm of eval code string>
+				for (p = start; p < end - 10; p++) {
+					if (p[0] == 0x68 && *(DWORD *)&p[1] == (DWORD)evalcodestr) {
+						PUCHAR y;
+						// found the push, now search down for relative call
+						for (y = p; y < p + 0x40; y++) {
+							if (y[0] == 0xe8) {
+								PUCHAR target = y + 5 + *(int *)&y[1];
+								if (target > start && target < end) {
+									// if we find it, the target of the call is COleScript::Compile
+									return (ULONG_PTR)target;
+								}
+							}
+						}
+						break;
+					}
+				}
+				break;
+			}
+		}
+		break;
+	}
+	return 0;
+}
+
+
+// only 32-bit supported
+ULONG_PTR get_cdocument_write_addr(HMODULE mod)
+{
+	PUCHAR buf = (PUCHAR)mod;
+
+	PIMAGE_DOS_HEADER doshdr;
+	PIMAGE_NT_HEADERS nthdr;
+	PIMAGE_SECTION_HEADER sechdr;
+	unsigned int numsecs, i;
+	PUCHAR start, end;
+	PUCHAR p;
+
+	doshdr = (PIMAGE_DOS_HEADER)buf;
+	nthdr = (PIMAGE_NT_HEADERS)(buf + doshdr->e_lfanew);
+	sechdr = (PIMAGE_SECTION_HEADER)((PUCHAR)&nthdr->OptionalHeader + nthdr->FileHeader.SizeOfOptionalHeader);
+	numsecs = nthdr->FileHeader.NumberOfSections;
+
+	for (i = 0; i < numsecs; i++) {
+		if (memcmp(sechdr[i].Name, ".text", 5))
+			continue;
+		start = buf + sechdr[i].VirtualAddress;
+		end = start + sechdr[i].Misc.VirtualSize;
+
+		for (p = start; p < end - 6; p++) {
+			if (!memcmp(p, L"\r\n", 6)) {
+				PUCHAR newline = p;
+				// got the newline, now find a push of the address of it followed immediately by a relative call within short distance of a retn 8
+				// this will give us CDocument::writeln
+				for (p = start; p < end - 10; p++) {
+					if (p[0] == 0x68 && *(DWORD *)&p[1] == (DWORD)newline && p[5] == 0xe8) {
+						PUCHAR x;
+						for (x = p + 10; x < p + 0x80; x++) {
+							if (!memcmp(x, "\xc2\x08\x00", 3)) {
+								PUCHAR y;
+								// found the retn 8
+								// now scan back to find a call pointing into .text preceded immediately by some form of a push (register or indirect through ebp plus offset)
+								for (y = p; y > p - 0x80; y--) {
+									if (y[0] == 0xe8) {
+										PUCHAR target = y + 5 + *(int *)&y[1];
+										if (target > start && target < end) {
+											// if we find it, the target of the call is CDocument::write
+											if (*(y - 3) == 0xff && *(y - 2) == 0x75 && *(y - 1) < 0x20)
+												return (ULONG_PTR)target;
+											else if ((*(y - 1) & 0xf8) == 0x50)
+												return (ULONG_PTR)target;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				break;
+			}
+		}
+	}
+	return 0;
 }

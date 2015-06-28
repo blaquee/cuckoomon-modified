@@ -21,6 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "hooking.h"
 #include "misc.h"
 #include "log.h"
+#include "config.h"
 
 HOOKDEF(LONG, WINAPI, RegOpenKeyExA,
     __in        HKEY hKey,
@@ -31,6 +32,26 @@ HOOKDEF(LONG, WINAPI, RegOpenKeyExA,
 ) {
     LONG ret = Old_RegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired,
         phkResult);
+
+    // fake the absence of some keys
+    if (!g_config.no_stealth && ret == ERROR_SUCCESS) {
+        unsigned int allocsize = sizeof(KEY_NAME_INFORMATION)+MAX_KEY_BUFLEN;
+        PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
+        wchar_t *keypath = get_full_key_pathA(hKey, lpSubKey, keybuf, allocsize);
+
+		if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__\\VBOXBIOS") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__\\VBOXFACP") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__\\VBOXRSDT")) {
+			lasterror_t errors;
+			ret = errors.Win32Error = ERROR_FILE_NOT_FOUND;
+			errors.NtstatusError = STATUS_OBJECT_NAME_NOT_FOUND;
+			set_lasterrors(&errors);
+		}
+    }
+
     LOQ_zero("registry", "psPe", "Registry", hKey, "SubKey", lpSubKey, "Handle", phkResult,
 		"FullName", hKey, lpSubKey);
     return ret;
@@ -45,6 +66,26 @@ HOOKDEF(LONG, WINAPI, RegOpenKeyExW,
 ) {
     LONG ret = Old_RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired,
         phkResult);
+
+    // fake the absence of some keys
+    if (!g_config.no_stealth && ret == ERROR_SUCCESS) {
+        unsigned int allocsize = sizeof(KEY_NAME_INFORMATION)+MAX_KEY_BUFLEN;
+        PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
+        wchar_t *keypath = get_full_key_pathW(hKey, lpSubKey, keybuf, allocsize);
+
+		if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__\\VBOXBIOS") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__\\VBOXFACP") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__") ||
+			!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__\\VBOXRSDT")) {
+			lasterror_t errors;
+			ret = errors.Win32Error = ERROR_FILE_NOT_FOUND;
+			errors.NtstatusError = STATUS_OBJECT_NAME_NOT_FOUND;
+			set_lasterrors(&errors);
+		}
+	}
+
     LOQ_zero("registry", "puPE", "Registry", hKey, "SubKey", lpSubKey, "Handle", phkResult,
 		"FullName", hKey, lpSubKey);
 	return ret;
@@ -121,8 +162,8 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyW,
     __in   DWORD cchName
 ) {
 	LONG ret = Old_RegEnumKeyW(hKey, dwIndex, lpName, cchName);
-    LOQ_zero("registry", "piuE", "Handle", hKey, "Index", dwIndex, "Name", lpName,
-		"FullName", hKey, lpName);
+    LOQ_zero("registry", "piuE", "Handle", hKey, "Index", dwIndex, "Name", ret ? L"" : lpName,
+		"FullName", hKey, ret ? L"" : lpName);
 
 	return ret;
 }
@@ -139,8 +180,8 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 ) {
 	LONG ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved,
         lpClass, lpcClass, lpftLastWriteTime);
-    LOQ_zero("registry", "pisse", "Handle", hKey, "Index", dwIndex, "Name", lpName,
-		"Class", lpClass, "FullName", hKey, lpName);
+    LOQ_zero("registry", "pisse", "Handle", hKey, "Index", dwIndex, "Name", ret ? "" : lpName,
+		"Class", ret ? "" : lpClass, "FullName", hKey, ret ? "" : lpName);
     return ret;
 }
 
@@ -156,8 +197,8 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExW,
 ) {
 	LONG ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved,
         lpClass, lpcClass, lpftLastWriteTime);
-    LOQ_zero("registry", "piuuE", "Handle", hKey, "Index", dwIndex, "Name", lpName,
-		"Class", lpClass, "FullName", hKey, lpName);
+    LOQ_zero("registry", "piuuE", "Handle", hKey, "Index", dwIndex, "Name", ret ? L"" : lpName,
+		"Class", ret ? L"" : lpClass, "FullName", hKey, ret ? L"" : lpName);
     return ret;
 }
 
@@ -283,11 +324,9 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExA,
 			"Data", *lpType, *lpcbData, lpData,
 			"FullName", keypath);
 
-		// fake the vendor name
-		if (keypath && *lpcbData >= 13 && !wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0\\Identifier") && !memcmp(lpData, "QEMU HARDDISK", 13)) {
-			memcpy(lpData, "DELL", 4);
-		}
-
+		// fake some values
+		if (!g_config.no_stealth)
+			perform_ascii_registry_fakery(keypath, lpData, *lpcbData);
 		free(keybuf);
 	}
     else if (ret == ERROR_MORE_DATA) {
@@ -324,11 +363,9 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExW,
             "Data", *lpType, *lpcbData, lpData,
 			"FullName", keypath);
 
-		// fake the vendor name
-		if (keypath && *lpcbData >= 13 && !wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0\\Identifier") && !memcmp(lpData, "QEMU HARDDISK", 13)) {
-			memcpy(lpData, "DELL", 4);
-		}
-
+        // fake some values
+		if (!g_config.no_stealth)
+			perform_unicode_registry_fakery(keypath, lpData, *lpcbData);
 		free(keybuf);
 	}
     else if (ret == ERROR_MORE_DATA) {

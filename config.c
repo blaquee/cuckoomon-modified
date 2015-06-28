@@ -24,17 +24,23 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 int read_config(void)
 {
     // TODO unicode support
-    char buf[512], config_fname[MAX_PATH];
+    char buf[32768], config_fname[MAX_PATH];
 	FILE *fp;
 	unsigned int i;
+	unsigned int vallen;
 
     sprintf(config_fname, "C:\\%u.ini", GetCurrentProcessId());
 
     fp = fopen(config_fname, "r");
-	if (fp == NULL)
-		return 0;
+	if (fp == NULL) {
+		// for debugging purposes
+		fp = fopen("C:\\config.ini", "r");
+		if (fp == NULL)
+			return 0;
+	}
 
 	g_config.force_sleepskip = -1;
+	memset(buf, 0, sizeof(buf));
 	while (fgets(buf, sizeof(buf), fp) != NULL)
 	{
         // cut off the newline
@@ -49,12 +55,16 @@ int read_config(void)
 			const char *key = buf, *value = p + 1;
 
 			*p = 0;
-
+			vallen = (unsigned int)strlen(value);
             if(!strcmp(key, "pipe")) {
-                strncpy(g_config.pipe_name, value,
-                    ARRAYSIZE(g_config.pipe_name));
+				for (i = 0; i < vallen; i++)
+					g_config.pipe_name[i] = (wchar_t)(unsigned short)value[i];
             }
-            else if(!strcmp(key, "results")) {
+			else if (!strcmp(key, "logserver")) {
+				strncpy(g_config.logserver, value,
+					ARRAYSIZE(g_config.logserver));
+			}
+			else if (!strcmp(key, "results")) {
                 strncpy(g_config.results, value,
                     ARRAYSIZE(g_config.results));
             }
@@ -80,14 +90,22 @@ int read_config(void)
 					}
 					else {
 						// is a URL
-						wchar_t *utmp = calloc(1, 512 * sizeof(wchar_t));
 						unsigned int url_len = (unsigned int)strlen(value);
+						wchar_t *utmp = calloc(1, (url_len + 1) * sizeof(wchar_t));
 						for (i = 0; i < url_len; i++)
 							utmp[i] = (wchar_t)(unsigned short)value[i];
 						g_config.url_of_interest = utmp;
 						g_config.suspend_logging = TRUE;
 					}
 				}
+			}
+			else if (!strcmp(key, "referrer")) {
+				unsigned int ref_len = (unsigned int)strlen(value);
+				wchar_t *rtmp = calloc(1, (ref_len + 1) * sizeof(wchar_t));
+				for (i = 0; i < ref_len; i++)
+					rtmp[i] = (wchar_t)(unsigned short)value[i];
+				g_config.w_referrer = rtmp;
+				g_config.referrer = strdup(value);
 			}
 			else if (!strcmp(key, "analyzer")) {
                 strncpy(g_config.analyzer, value,
@@ -109,12 +127,14 @@ int read_config(void)
             else if(!strcmp(key, "startup-time")) {
                 g_config.startup_time = atoi(value);
             }
-            else if(!strcmp(key, "host-ip")) {
+			/*
+			else if(!strcmp(key, "host-ip")) {
                 g_config.host_ip = inet_addr(value);
             }
             else if(!strcmp(key, "host-port")) {
                 g_config.host_port = atoi(value);
             }
+			*/
             else if(!strcmp(key, "force-sleepskip")) {
                 g_config.force_sleepskip = value[0] == '1';
             }
@@ -124,6 +144,9 @@ int read_config(void)
 			else if (!strcmp(key, "terminate-event")) {
 				strncpy(g_config.terminate_event_name, value,
 					ARRAYSIZE(g_config.terminate_event_name));
+			}
+			else if (!strcmp(key, "no-stealth")) {
+				g_config.no_stealth = value[0] == '1';
 			}
         }
     }

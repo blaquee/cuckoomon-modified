@@ -247,11 +247,18 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateProcess,
 	lasterror_t lasterror;
 
 	get_lasterrors(&lasterror);
-    LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
-	if (ProcessHandle == NULL || GetCurrentProcessId() == GetProcessId(ProcessHandle)) {
+	if (ProcessHandle == NULL) {
+		// we mark this here as this termination type will kill all threads but ours, including
+		// the logging thread.  By setting this, we'll switch into a direct logging mode
+		// for the subsequent call to NtTerminateProcess against our own process handle
+		process_shutting_down = 1;
+		LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
+	}
+	else if (GetCurrentProcessId() == GetProcessId(ProcessHandle)) {
+		process_shutting_down = 1;
+		LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
 		pipe("KILL:%d", GetCurrentProcessId());
 		log_free();
-		process_shutting_down = 1;
 	}
 	else {
 		DWORD PID = pid_from_process_handle(ProcessHandle);
@@ -259,6 +266,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateProcess,
 			ret = STATUS_ACCESS_DENIED;
 			LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
 			return ret;
+		}
+		else {
+			LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
 		}
 		pipe("KILL:%d", PID);
 	}
@@ -302,33 +312,6 @@ HOOKDEF(NTSTATUS, WINAPI, NtOpenSection,
         ObjectAttributes);
     LOQ_ntstatus("process", "Ppo", "SectionHandle", SectionHandle, "DesiredAccess", DesiredAccess,
         "ObjectAttributes", ObjectAttributes ? ObjectAttributes->ObjectName : NULL);
-    return ret;
-}
-
-HOOKDEF(BOOL, WINAPI, CreateProcessInternalW,
-    __in_opt    LPVOID lpUnknown1,
-    __in_opt    LPWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFOW lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation,
-    __in_opt    LPVOID lpUnknown2
-) {
-    BOOL ret = Old_CreateProcessInternalW(lpUnknown1, lpApplicationName,
-        lpCommandLine, lpProcessAttributes, lpThreadAttributes,
-        bInheritHandles, dwCreationFlags, lpEnvironment,
-        lpCurrentDirectory, lpStartupInfo, lpProcessInformation, lpUnknown2);
-    LOQ_bool("process", "uuhiipp", "ApplicationName", lpApplicationName,
-        "CommandLine", lpCommandLine, "CreationFlags", dwCreationFlags,
-        "ProcessId", lpProcessInformation->dwProcessId,
-        "ThreadId", lpProcessInformation->dwThreadId,
-        "ProcessHandle", lpProcessInformation->hProcess,
-        "ThreadHandle", lpProcessInformation->hThread);
     return ret;
 }
 
@@ -429,18 +412,18 @@ HOOKDEF(NTSTATUS, WINAPI, NtReadVirtualMemory,
     __in        HANDLE ProcessHandle,
     __in        LPCVOID BaseAddress,
     __out       LPVOID Buffer,
-    __in        ULONG NumberOfBytesToRead,
-    __out_opt   PULONG NumberOfBytesReaded
+    __in        SIZE_T NumberOfBytesToRead,
+    __out_opt   PSIZE_T NumberOfBytesRead
 ) {
 	NTSTATUS ret;
-    ENSURE_ULONG(NumberOfBytesReaded);
+    ENSURE_SIZET(NumberOfBytesRead);
 
     ret = Old_NtReadVirtualMemory(ProcessHandle, BaseAddress, Buffer,
-        NumberOfBytesToRead, NumberOfBytesReaded);
+        NumberOfBytesToRead, NumberOfBytesRead);
 
 	if (pid_from_process_handle(ProcessHandle) != GetCurrentProcessId()) {
 		LOQ_ntstatus("process", "ppB", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
-			"Buffer", NumberOfBytesReaded, Buffer);
+			"Buffer", NumberOfBytesRead, Buffer);
 	}
 
 	return ret;
@@ -451,7 +434,7 @@ HOOKDEF(BOOL, WINAPI, ReadProcessMemory,
     _In_    LPCVOID lpBaseAddress,
     _Out_   LPVOID lpBuffer,
     _In_    SIZE_T nSize,
-    _Out_   SIZE_T *lpNumberOfBytesRead
+    _Out_   PSIZE_T lpNumberOfBytesRead
 ) {
 	BOOL ret;
     ENSURE_SIZET(lpNumberOfBytesRead);
@@ -471,12 +454,12 @@ HOOKDEF(NTSTATUS, WINAPI, NtWriteVirtualMemory,
     __in        HANDLE ProcessHandle,
     __in        LPVOID BaseAddress,
     __in        LPCVOID Buffer,
-    __in        ULONG NumberOfBytesToWrite,
-    __out_opt   ULONG *NumberOfBytesWritten
+    __in        SIZE_T NumberOfBytesToWrite,
+    __out_opt   PSIZE_T NumberOfBytesWritten
 ) {
 	NTSTATUS ret;
 	DWORD pid;
-    ENSURE_ULONG(NumberOfBytesWritten);
+    ENSURE_SIZET(NumberOfBytesWritten);
 
     ret = Old_NtWriteVirtualMemory(ProcessHandle, BaseAddress, Buffer,
         NumberOfBytesToWrite, NumberOfBytesWritten);
@@ -502,7 +485,7 @@ HOOKDEF(BOOL, WINAPI, WriteProcessMemory,
     _In_    LPVOID lpBaseAddress,
     _In_    LPCVOID lpBuffer,
     _In_    SIZE_T nSize,
-    _Out_   SIZE_T *lpNumberOfBytesWritten
+    _Out_   PSIZE_T lpNumberOfBytesWritten
 ) {
 	BOOL ret;
 	DWORD pid;
@@ -529,7 +512,7 @@ HOOKDEF(BOOL, WINAPI, WriteProcessMemory,
 HOOKDEF(NTSTATUS, WINAPI, NtProtectVirtualMemory,
     IN      HANDLE ProcessHandle,
     IN OUT  PVOID *BaseAddress,
-    IN OUT  PULONG NumberOfBytesToProtect,
+    IN OUT  PSIZE_T NumberOfBytesToProtect,
     IN      ULONG NewAccessProtection,
     OUT     PULONG OldAccessProtection
 ) {
@@ -541,7 +524,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtProtectVirtualMemory,
 	
 	ret = Old_NtProtectVirtualMemory(ProcessHandle, BaseAddress,
         NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
-    LOQ_ntstatus("process", "pPHhH", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
+    LOQ_ntstatus("process", "pPPhH", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
         "NumberOfBytesProtected", NumberOfBytesToProtect,
         "NewAccessProtection", NewAccessProtection,
         "OldAccessProtection", OldAccessProtection);
@@ -668,8 +651,40 @@ HOOKDEF(BOOLEAN, WINAPI, RtlDispatchException,
 	__in PEXCEPTION_RECORD ExceptionRecord,
 	__in PCONTEXT Context)
 {
+	if (ExceptionRecord && (ULONG_PTR)ExceptionRecord->ExceptionAddress >= g_our_dll_base && (ULONG_PTR)ExceptionRecord->ExceptionAddress < (g_our_dll_base + g_our_dll_size)) {
+		char buf[128];
+		_snprintf(buf, sizeof(buf), "Exception reported at offset 0x%x in cuckoomon itself", (DWORD)((ULONG_PTR)ExceptionRecord->ExceptionAddress - g_our_dll_base));
+		log_anomaly("cuckoocrash", buf);
+	}
+
 	// flush logs prior to handling of an exception without having to register a vectored exception handler
 	log_flush();
 
 	return Old_RtlDispatchException(ExceptionRecord, Context);
+}
+
+#if REPORT_EXCEPTIONS
+extern LONG WINAPI cuckoomon_exception_handler(
+	__in struct _EXCEPTION_POINTERS *ExceptionInfo
+	);
+#endif
+
+HOOKDEF(NTSTATUS, WINAPI, NtRaiseException,
+	__in PEXCEPTION_RECORD ExceptionRecord,
+	__in PCONTEXT Context,
+	__in BOOLEAN SearchFrames
+) {
+	EXCEPTION_POINTERS exc;
+	NTSTATUS ret;
+
+	exc.ContextRecord = Context;
+	exc.ExceptionRecord = ExceptionRecord;
+
+#if REPORT_EXCEPTIONS
+	cuckoomon_exception_handler(&exc);
+#endif
+
+	ret = Old_NtRaiseException(ExceptionRecord, Context, SearchFrames);
+
+	return ret;
 }

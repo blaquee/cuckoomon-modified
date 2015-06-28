@@ -24,6 +24,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "misc.h"
 #include "hook_file.h"
 #include "hook_sleep.h"
+#include "config.h"
+#include "ignore.h"
 
 HOOKDEF(HHOOK, WINAPI, SetWindowsHookExA,
     __in  int idHook,
@@ -86,23 +88,6 @@ HOOKDEF(UINT, WINAPI, SetErrorMode,
 	return ret;
 }
 
-
-HOOKDEF(NTSTATUS, WINAPI, LdrLoadDll,
-    __in_opt    PWCHAR PathToFile,
-    __in_opt    ULONG Flags,
-    __in        PUNICODE_STRING ModuleFileName,
-    __out       PHANDLE ModuleHandle
-) {
-	NTSTATUS ret;
-    COPY_UNICODE_STRING(library, ModuleFileName);
-
-    ret = Old_LdrLoadDll(PathToFile, Flags, ModuleFileName,
-        ModuleHandle);
-    LOQ_ntstatus("system", "hoP", "Flags", Flags, "FileName", &library,
-        "BaseAddress", ModuleHandle);
-    return ret;
-}
-
 // Called with the loader lock held
 HOOKDEF(NTSTATUS, WINAPI, LdrGetDllHandle,
     __in_opt    PWORD pwPath,
@@ -124,7 +109,7 @@ HOOKDEF(NTSTATUS, WINAPI, LdrGetProcedureAddress,
 ) {
     NTSTATUS ret = Old_LdrGetProcedureAddress(ModuleHandle, FunctionName,
         Ordinal, FunctionAddress);
-    LOQ_ntstatus("system", "pSiP", "ModuleHandle", ModuleHandle,
+    LOQ_ntstatus("system", "opSiP", "ModuleName", get_basename_of_module(ModuleHandle), "ModuleHandle", ModuleHandle,
         "FunctionName", FunctionName != NULL ? FunctionName->Length : 0,
             FunctionName != NULL ? FunctionName->Buffer : NULL,
         "Ordinal", Ordinal, "FunctionAddress", FunctionAddress);
@@ -149,18 +134,8 @@ HOOKDEF(BOOL, WINAPI, DeviceIoControl,
         "OutBuffer", lpBytesReturned ? *lpBytesReturned : nOutBufferSize,
             lpOutBuffer);
 
-	/* Fake harddrive size to 256GB */
-	if (ret && lpOutBuffer && nOutBufferSize >= sizeof(GET_LENGTH_INFORMATION) && dwIoControlCode == IOCTL_DISK_GET_LENGTH_INFO) {
-		((PGET_LENGTH_INFORMATION)lpOutBuffer)->Length.QuadPart = 256060514304L;
-	}
-	/* fake model name */
-	if (ret && dwIoControlCode == IOCTL_STORAGE_QUERY_PROPERTY && lpOutBuffer && nOutBufferSize > 4) {
-		ULONG i;
-		for (i = 0; i < nOutBufferSize - 4; i++) {
-			if (!memcmp(&((PCHAR)lpOutBuffer)[i], "QEMU", 4))
-				memcpy(&((PCHAR)lpOutBuffer)[i], "DELL", 4);
-		}
-	}
+	if (!g_config.no_stealth && ret && lpOutBuffer)
+		perform_device_fakery(lpOutBuffer, nOutBufferSize, dwIoControlCode);
 
 	return ret;
 }
@@ -226,7 +201,13 @@ HOOKDEF(BOOL, WINAPI, LookupPrivilegeValueW,
 HOOKDEF(NTSTATUS, WINAPI, NtClose,
     __in    HANDLE Handle
 ) {
-    NTSTATUS ret = Old_NtClose(Handle);
+	NTSTATUS ret;
+	if (Handle == g_log_handle) {
+		ret = STATUS_INVALID_HANDLE;
+		LOQ_ntstatus("system", "ps", "Handle", Handle, "Alert", "Tried to close Cuckoo's log handle");
+		return ret;
+	}
+	ret = Old_NtClose(Handle);
     LOQ_ntstatus("system", "p", "Handle", Handle);
     if(NT_SUCCESS(ret)) {
         file_close(Handle);
@@ -304,7 +285,24 @@ HOOKDEF(int, WINAPI, GetSystemMetrics,
     return ret;
 }
 
+typedef int (WINAPI * __GetSystemMetrics)(__in int nIndex);
+
+__GetSystemMetrics _GetSystemMetrics;
+
+DWORD WINAPI our_GetSystemMetrics(
+	__in int nIndex
+	) {
+	if (!_GetSystemMetrics) {
+		_GetSystemMetrics = (__GetSystemMetrics)GetProcAddress(LoadLibraryA("user32"), "GetSystemMetrics");
+	}
+	return _GetSystemMetrics(nIndex);
+}
+
 static LARGE_INTEGER last_skipped;
+static int num_to_spoof;
+static int num_spoofed;
+static int lastx;
+static int lasty;
 
 HOOKDEF(BOOL, WINAPI, GetCursorPos,
     _Out_ LPPOINT lpPoint
@@ -314,10 +312,21 @@ HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	/* work around the fact that skipping sleeps prevents the human module from making the system look active */
 	if (lpPoint && time_skipped.QuadPart != last_skipped.QuadPart) {
 		int xres, yres;
-		xres = GetSystemMetrics(0);
-		yres = GetSystemMetrics(1);
-		lpPoint->x = random() % xres;
-		lpPoint->y = random() % yres;
+		xres = our_GetSystemMetrics(0);
+		yres = our_GetSystemMetrics(1);
+		if (!num_to_spoof)
+			num_to_spoof = (random() % 20) + 10;
+		if (num_spoofed < num_to_spoof) {
+			lpPoint->x = random() % xres;
+			lpPoint->y = random() % yres;
+			num_spoofed++;
+		}
+		else {
+			lpPoint->x = lastx;
+			lpPoint->y = lasty;
+			lastx = lpPoint->x;
+			lasty = lpPoint->y;
+		}
 		last_skipped.QuadPart = time_skipped.QuadPart;
 	}
 	else if (last_skipped.QuadPart == 0) {
@@ -389,7 +398,7 @@ HOOKDEF(SHORT, WINAPI, GetAsyncKeyState,
 	__in int vKey
 ) {
 	SHORT ret = Old_GetAsyncKeyState(vKey);
-	if (asynckeystate_logcount < 50) {
+	if (asynckeystate_logcount < 50 && ((vKey >= 0x30 && vKey <= 0x39) || (vKey >= 0x41 && vKey <= 0x5a))) {
 		asynckeystate_logcount++;
 		LOQ_nonzero("windows", "i", "KeyCode", vKey);
 	}
@@ -413,5 +422,251 @@ HOOKDEF(NTSTATUS, WINAPI, RtlDecompressBuffer,
 
 	LOQ_ntstatus("misc", "b", "UncompressedBuffer", ret ? 0 : *FinalUncompressedSize, UncompressedBuffer);
 
+	return ret;
+}
+
+HOOKDEF(void, WINAPI, GetSystemInfo,
+	__out LPSYSTEM_INFO lpSystemInfo
+) {
+	int ret = 0;
+
+	Old_GetSystemInfo(lpSystemInfo);
+
+	if (!g_config.no_stealth && lpSystemInfo->dwNumberOfProcessors == 1)
+		lpSystemInfo->dwNumberOfProcessors = 2;
+
+	LOQ_void("misc", "");
+
+	return;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, NtQuerySystemInformation,
+	_In_ ULONG SystemInformationClass,
+	_Inout_ PVOID SystemInformation,
+	_In_ ULONG SystemInformationLength,
+	_Out_opt_ PULONG ReturnLength
+) {
+	NTSTATUS ret;
+	char *buf;
+	lasterror_t lasterror;
+	ENSURE_ULONG(ReturnLength);
+
+	if (SystemInformationClass != SystemProcessInformation || SystemInformation == NULL) {
+normal_call:
+		ret = Old_NtQuerySystemInformation(SystemInformationClass, SystemInformation, SystemInformationLength, ReturnLength);
+		LOQ_ntstatus("misc", "i", "SystemInformationClass", SystemInformationClass);
+
+		if (!g_config.no_stealth && SystemInformationClass == SystemBasicInformation && SystemInformationLength >= sizeof(SYSTEM_BASIC_INFORMATION) && NT_SUCCESS(ret)) {
+			PSYSTEM_BASIC_INFORMATION p = (PSYSTEM_BASIC_INFORMATION)SystemInformation;
+			p->NumberOfProcessors = 2;
+		}
+		return ret;
+	}
+
+	get_lasterrors(&lasterror);
+	buf = calloc(1, SystemInformationLength);
+	set_lasterrors(&lasterror);
+	if (buf == NULL)
+		goto normal_call;
+
+	ret = Old_NtQuerySystemInformation(SystemInformationClass, buf, SystemInformationLength, ReturnLength);
+	LOQ_ntstatus("misc", "i", "SystemInformationClass", SystemInformationClass);
+
+	if (SystemInformationLength >= sizeof(SYSTEM_PROCESS_INFORMATION) && NT_SUCCESS(ret)) {
+		PSYSTEM_PROCESS_INFORMATION our_p = (PSYSTEM_PROCESS_INFORMATION)buf;
+		char *their_last_p = NULL;
+		char *their_p = (char *)SystemInformation;
+		ULONG lastlen = 0;
+		while (1) {
+			if (!is_protected_pid((DWORD)our_p->UniqueProcessId)) {
+				PSYSTEM_PROCESS_INFORMATION tmp;
+				if (our_p->NextEntryOffset)
+					lastlen = our_p->NextEntryOffset;
+				else
+					lastlen = *ReturnLength - (ULONG)((char *)our_p - buf);
+				// make sure we copy all data associated with the entry
+				memcpy(their_p, our_p, lastlen);
+				tmp = (PSYSTEM_PROCESS_INFORMATION)their_p;
+				tmp->NextEntryOffset = lastlen;
+				// adjust the only pointer field in the struct so that it points into the user's buffer,
+				// but only if the pointer exists, otherwise we'd rewrite a NULL pointer to something not NULL
+				if (tmp->ImageName.Buffer)
+					tmp->ImageName.Buffer = (PWSTR)(((ULONG_PTR)tmp->ImageName.Buffer - (ULONG_PTR)our_p) + (ULONG_PTR)their_p);
+				their_last_p = their_p;
+				their_p += lastlen;
+			}
+			if (!our_p->NextEntryOffset)
+				break;
+			our_p = (PSYSTEM_PROCESS_INFORMATION)((PCHAR)our_p + our_p->NextEntryOffset);
+		}
+		if (their_last_p) {
+			PSYSTEM_PROCESS_INFORMATION tmp;
+			tmp = (PSYSTEM_PROCESS_INFORMATION)their_last_p;
+			*ReturnLength = (ULONG)(their_last_p + tmp->NextEntryOffset - (char *)SystemInformation);
+			tmp->NextEntryOffset = 0;
+		}
+	}
+
+	free(buf);
+
+	return ret;
+}
+
+static GUID _CLSID_DiskDrive = { 0x4d36e967, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 };
+static GUID _CLSID_CDROM = { 0x4d36e965, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 };
+static GUID _CLSID_Display = { 0x4d36e968, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 };
+static GUID _CLSID_FDC = { 0x4d36e969, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 };
+static GUID _CLSID_HDC = { 0x4d36e96a, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 };
+static GUID _CLSID_FloppyDisk = { 0x4d36e980, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 };
+
+static char *known_object(IID *cls)
+{
+	if (!memcmp(cls, &_CLSID_DiskDrive, sizeof(*cls)))
+		return "DiskDrive";
+	else if (!memcmp(cls, &_CLSID_CDROM, sizeof(*cls)))
+		return "CDROM";
+	else if (!memcmp(cls, &_CLSID_Display, sizeof(*cls)))
+		return "Display";
+	else if (!memcmp(cls, &_CLSID_FDC, sizeof(*cls)))
+		return "FDC";
+	else if (!memcmp(cls, &_CLSID_HDC, sizeof(*cls)))
+		return "HDC";
+	else if (!memcmp(cls, &_CLSID_FloppyDisk, sizeof(*cls)))
+		return "FloppyDisk";
+
+	return NULL;
+}
+
+HOOKDEF(HDEVINFO, WINAPI, SetupDiGetClassDevsA,
+	_In_opt_ const GUID   *ClassGuid,
+	_In_opt_       PCSTR Enumerator,
+	_In_opt_       HWND   hwndParent,
+	_In_           DWORD  Flags
+) {
+	IID id1;
+	char idbuf[40];
+	char *known;
+	lasterror_t lasterror;
+	HDEVINFO ret = Old_SetupDiGetClassDevsA(ClassGuid, Enumerator, hwndParent, Flags);
+
+	get_lasterrors(&lasterror);
+
+	if (ClassGuid) {
+		memcpy(&id1, ClassGuid, sizeof(id1));
+		sprintf(idbuf, "%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X", id1.Data1, id1.Data2, id1.Data3,
+			id1.Data4[0], id1.Data4[1], id1.Data4[2], id1.Data4[3], id1.Data4[4], id1.Data4[5], id1.Data4[6], id1.Data4[7]);
+		set_lasterrors(&lasterror);
+
+		if ((known = known_object(&id1)))
+			LOQ_handle("misc", "ss", "ClassGuid", idbuf, "Known", known);
+		else
+			LOQ_handle("misc", "s", "ClassGuid", idbuf);
+	}
+	return ret;
+}
+
+HOOKDEF(HDEVINFO, WINAPI, SetupDiGetClassDevsW,
+	_In_opt_ const GUID   *ClassGuid,
+	_In_opt_       PCWSTR Enumerator,
+	_In_opt_       HWND   hwndParent,
+	_In_           DWORD  Flags
+) {
+	IID id1;
+	char idbuf[40];
+	char *known;
+	lasterror_t lasterror;
+	HDEVINFO ret = Old_SetupDiGetClassDevsW(ClassGuid, Enumerator, hwndParent, Flags);
+	if (ClassGuid) {
+		memcpy(&id1, ClassGuid, sizeof(id1));
+		sprintf(idbuf, "%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X", id1.Data1, id1.Data2, id1.Data3,
+			id1.Data4[0], id1.Data4[1], id1.Data4[2], id1.Data4[3], id1.Data4[4], id1.Data4[5], id1.Data4[6], id1.Data4[7]);
+		set_lasterrors(&lasterror);
+
+		if ((known = known_object(&id1)))
+			LOQ_handle("misc", "ss", "ClassGuid", idbuf, "Known", known);
+		else
+			LOQ_handle("misc", "s", "ClassGuid", idbuf);
+	}
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, SetupDiGetDeviceRegistryPropertyA,
+	_In_      HDEVINFO         DeviceInfoSet,
+	_In_      PSP_DEVINFO_DATA DeviceInfoData,
+	_In_      DWORD            Property,
+	_Out_opt_ PDWORD           PropertyRegDataType,
+	_Out_opt_ PBYTE            PropertyBuffer,
+	_In_      DWORD            PropertyBufferSize,
+	_Out_opt_ PDWORD           RequiredSize
+) {
+	BOOL ret = Old_SetupDiGetDeviceRegistryPropertyA(DeviceInfoSet, DeviceInfoData, Property, PropertyRegDataType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+
+	if (PropertyBuffer)
+		LOQ_bool("misc", "ir", "Property", Property, "PropertyBuffer", PropertyRegDataType, PropertyBufferSize, PropertyBuffer);
+
+	if (!g_config.no_stealth && ret && PropertyBuffer) {
+		replace_ci_string_in_buf(PropertyBuffer, PropertyBufferSize, "VBOX", "DELL_");
+		replace_ci_string_in_buf(PropertyBuffer, PropertyBufferSize, "QEMU", "DELL");
+		replace_ci_string_in_buf(PropertyBuffer, PropertyBufferSize, "VMWARE", "DELL__");
+	}
+
+	return ret;
+}
+
+
+HOOKDEF(BOOL, WINAPI, SetupDiGetDeviceRegistryPropertyW,
+	_In_      HDEVINFO         DeviceInfoSet,
+	_In_      PSP_DEVINFO_DATA DeviceInfoData,
+	_In_      DWORD            Property,
+	_Out_opt_ PDWORD           PropertyRegDataType,
+	_Out_opt_ PBYTE            PropertyBuffer,
+	_In_      DWORD            PropertyBufferSize,
+	_Out_opt_ PDWORD           RequiredSize
+) {
+	BOOL ret;
+	ENSURE_DWORD(PropertyRegDataType);
+	ret = Old_SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet, DeviceInfoData, Property, PropertyRegDataType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+
+	if (PropertyBuffer)
+		LOQ_bool("misc", "iR", "Property", Property, "PropertyBuffer", PropertyRegDataType, PropertyBufferSize, PropertyBuffer);
+
+	if (!g_config.no_stealth && ret && PropertyBuffer) {
+		replace_ci_wstring_in_buf((PWCHAR)PropertyBuffer, PropertyBufferSize, L"VBOX", L"DELL_");
+		replace_ci_wstring_in_buf((PWCHAR)PropertyBuffer, PropertyBufferSize, L"QEMU", L"DELL");
+		replace_ci_wstring_in_buf((PWCHAR)PropertyBuffer, PropertyBufferSize, L"VMWARE", L"DELL__");
+	}
+
+	return ret;
+}
+
+HOOKDEF(HRESULT, WINAPI, DecodeImageEx,
+	__in PVOID pStream, // IStream *
+	__in PVOID pMap, // IMapMIMEToCLSID *
+	__in PVOID pEventSink, // IUnknown *
+	__in_opt LPCWSTR pszMIMETypeParam
+) {
+	HRESULT ret = Old_DecodeImageEx(pStream, pMap, pEventSink, pszMIMETypeParam);
+	LOQ_hresult("misc", "");
+	return ret;
+}
+
+HOOKDEF(HRESULT, WINAPI, DecodeImage,
+	__in PVOID pStream, // IStream *
+	__in PVOID pMap, // IMapMIMEToCLSID *
+	__in PVOID pEventSink // IUnknown *
+) {
+	HRESULT ret = Old_DecodeImage(pStream, pMap, pEventSink);
+	LOQ_hresult("misc", "");
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, LsaOpenPolicy,
+	PLSA_UNICODE_STRING SystemName,
+	PVOID ObjectAttributes,
+	ACCESS_MASK DesiredAccess,
+	PVOID PolicyHandle
+) {
+	NTSTATUS ret = Old_LsaOpenPolicy(SystemName, ObjectAttributes, DesiredAccess, PolicyHandle);
+	LOQ_ntstatus("misc", "");
 	return ret;
 }

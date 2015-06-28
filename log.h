@@ -66,13 +66,14 @@ void loq(int index, const char *category, const char *name,
     int is_success, ULONG_PTR return_value, const char *fmt, ...);
 void log_new_process();
 void log_new_thread();
-void log_anomaly(const char *subcategory, int success,
+void log_anomaly(const char *subcategory, const char *msg);
+void log_hook_anomaly(const char *subcategory, int success,
     const char *funcname, const char *msg);
 void log_hook_modification(const char *funcname, const char *origbytes, const char *newbytes, unsigned int len);
 void log_hook_removal(const char *funcname);
 void log_hook_restoration(const char *funcname);
 
-void log_init(unsigned int ip, unsigned short port, int debug);
+void log_init(int debug);
 void log_flush();
 void log_free();
 
@@ -83,6 +84,19 @@ void debug_message(const char *msg);
 int log_resolve_index(const char *funcname, int index);
 extern const char *logtbl[][2];
 extern int g_log_index;
+
+extern DWORD g_log_thread_id;
+extern DWORD g_logwatcher_thread_id;
+extern HANDLE g_log_handle;
+
+enum {
+	API_OTHER = 0,
+	API_NTREADFILE = 1,
+};
+void set_special_api(DWORD API, BOOLEAN deletelast);
+DWORD get_last_api(void);
+
+#define BUFFER_LOG_MAX 256
 
 #define _LOQ(eval, cat, fmt, ...) do { static int _index; if(_index == 0) \
     _index = ++g_log_index; loq(_index, cat, \

@@ -29,7 +29,7 @@ void set_hooks_dll(const wchar_t *library);
 
 HOOKDEF2(NTSTATUS, WINAPI, LdrLoadDll,
     __in_opt    PWCHAR PathToFile,
-    __in_opt    ULONG Flags,
+    __in_opt    PULONG Flags,
     __in        PUNICODE_STRING ModuleFileName,
     __out       PHANDLE ModuleHandle
 ) {
@@ -54,14 +54,19 @@ HOOKDEF2(NTSTATUS, WINAPI, LdrLoadDll,
 	activity when there's not, so hide it
 	*/
 	if (!called_by_hook() && wcsncmp(library.Buffer, g_config.dllpath, wcslen(g_config.dllpath))) {
-		if (!wcsicmp(library.Buffer, g_config.file_of_interest))
-			g_config.suspend_logging = FALSE;
+		if (g_config.file_of_interest && g_config.suspend_logging) {
+			wchar_t *absolutename = malloc(32768 * sizeof(wchar_t));
+			ensure_absolute_unicode_path(absolutename, library.Buffer);
+			if (!wcsicmp(absolutename, g_config.file_of_interest))
+				g_config.suspend_logging = FALSE;
+			free(absolutename);
+		}
 
 		if (!wcsncmp(library.Buffer, L"\\??\\", 4) || library.Buffer[1] == L':')
-	        LOQspecial_ntstatus("system", "hFP", "Flags", Flags, "FileName", library.Buffer,
+	        LOQspecial_ntstatus("system", "HFP", "Flags", Flags, "FileName", library.Buffer,
 		       "BaseAddress", ModuleHandle);
 		else
-			LOQspecial_ntstatus("system", "hoP", "Flags", Flags, "FileName", &library,
+			LOQspecial_ntstatus("system", "HoP", "Flags", Flags, "FileName", &library,
 				"BaseAddress", ModuleHandle);
 	}
 
@@ -72,6 +77,7 @@ HOOKDEF2(NTSTATUS, WINAPI, LdrLoadDll,
 
     if(NT_SUCCESS(ret)) {
 		PWCHAR end;
+		PWCHAR start = NULL, start2 = NULL;
 
 		// inform the call below not to add this DLL to the list of system DLLs if it's
 		// the DLL of interest
@@ -83,15 +89,39 @@ HOOKDEF2(NTSTATUS, WINAPI, LdrLoadDll,
 		// we ensure null termination via the COPY_UNICODE_STRING macro above, so we don't need a length
 		// first strip off the .dll
 		end = wcsrchr(library.Buffer, L'.');
+		start = wcsrchr(library.Buffer, L'\\');
+		start2 = wcsrchr(library.Buffer, L'/');
 		if (end && !wcsicmp(end, L".dll"))
 			*end = L'\0';
-        set_hooks_dll(library.Buffer);
+		if (start2 && start2 > start)
+			set_hooks_dll(start2 + 1);
+		else if (start && start > start2)
+			set_hooks_dll(start + 1);
+		else
+			set_hooks_dll(library.Buffer);
     }
 
 	set_lasterrors(&lasterror);
 
     return ret;
 }
+
+extern void revalidate_all_hooks(void);
+
+HOOKDEF2(NTSTATUS, WINAPI, LdrUnloadDll,
+	PVOID DllImageBase
+) {
+	NTSTATUS ret = Old2_LdrUnloadDll(DllImageBase);
+
+	if (!is_valid_address_range((ULONG_PTR)DllImageBase, 0x1000)) {
+		// if this unload actually caused removal of the DLL instead of a reference counter decrement,
+		// then we need to loop through our hooks and unmark the hooks eliminated by this removal
+		revalidate_all_hooks();
+	}
+
+	return ret;
+}
+
 
 HOOKDEF2(BOOL, WINAPI, CreateProcessInternalW,
     __in_opt    LPVOID lpUnknown1,
@@ -205,6 +235,76 @@ HOOKDEF2(HRESULT, WINAPI, CoCreateInstance,
 		LOQspecial_hresult("com", "shss", "rclsid", idbuf1, "ClsContext", dwClsContext, "riid", idbuf2, "KnownObject", known);
 	else
 		LOQspecial_hresult("com", "shs", "rclsid", idbuf1, "ClsContext", dwClsContext, "riid", idbuf2);
+
+	return ret;
+}
+
+// 32-bit only
+HOOKDEF2(int, WINAPI, JsEval,
+	PVOID Arg1,
+	PVOID Arg2,
+	PVOID Arg3,
+	int Index,
+	DWORD *scriptobj
+) {
+	PWCHAR jsbuf;
+	PUCHAR p;
+	int ret = Old2_JsEval(Arg1, Arg2, Arg3, Index, scriptobj);
+
+	p = (PUCHAR)scriptobj[4 * Index - 2];
+	jsbuf = *(PWCHAR *)(p + 8);
+	if (jsbuf)
+		LOQspecial_ntstatus("browser", "u", "Javascript", jsbuf);
+
+	return ret;
+}
+
+HOOKDEF2(int, WINAPI, COleScript_Compile,
+	PVOID Arg1,
+	PWCHAR ScriptBuf,
+	int Arg3,
+	int Arg4,
+	int Arg5,
+	PWCHAR LocationBuf,
+	PVOID Arg7
+) {
+	int ret = Old2_COleScript_Compile(Arg1, ScriptBuf, Arg3, Arg4, Arg5, LocationBuf, Arg7);
+	LOQspecial_ntstatus("browser", "uu", "Source", LocationBuf, "Script", ScriptBuf);
+	return ret;
+}
+
+// 32-bit only
+// based on code by Stephan Chenette and Moti Joseph of Websense, Inc. released under the GPLv3
+// http://securitylabs.websense.com/content/Blogs/3198.aspx
+
+HOOKDEF2(int, WINAPI, CDocument_write,
+	PVOID this,
+	SAFEARRAY *psa
+) {
+	DWORD i;
+	PWCHAR buf;
+	int ret = Old2_CDocument_write(this, psa);
+	VARIANT *pvars = (VARIANT *)psa->pvData;
+	unsigned int buflen = 0;
+	unsigned int offset = 0;
+	for (i = 0; i < psa->rgsabound[0].cElements; i++) {
+		if (pvars[i].vt == VT_BSTR)
+			buflen += (unsigned int)wcslen((const wchar_t *)pvars[i].pbstrVal) + 8;
+	}
+	buf = calloc(1, (buflen + 1) * sizeof(wchar_t));
+	if (buf == NULL)
+		return ret;
+
+	for (i = 0; i < psa->rgsabound[0].cElements; i++) {
+		if (pvars[i].vt == VT_BSTR) {
+			wcscpy(buf + offset, (const wchar_t *)pvars[i].pbstrVal);
+			offset += (unsigned int)wcslen((const wchar_t *)pvars[i].pbstrVal);
+			wcscpy(buf + offset, L"\r\n||||\r\n");
+			offset += 8;
+		}
+	}
+
+	LOQspecial_ntstatus("browser", "u", "Buffer", buf);
 
 	return ret;
 }

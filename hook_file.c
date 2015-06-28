@@ -28,9 +28,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "lookup.h"
 #include "config.h"
 
-#define DUMP_FILE_MASK (GENERIC_WRITE | FILE_GENERIC_WRITE | \
-    FILE_WRITE_DATA | FILE_APPEND_DATA | STANDARD_RIGHTS_WRITE | \
-    STANDARD_RIGHTS_ALL)
+#define DUMP_FILE_MASK ((GENERIC_ALL | GENERIC_WRITE | FILE_GENERIC_WRITE | \
+    FILE_WRITE_DATA | FILE_APPEND_DATA | STANDARD_RIGHTS_WRITE | MAXIMUM_ALLOWED) & ~SYNCHRONIZE)
 
 // length of a hardcoded unicode string
 #define UNILEN(x) (sizeof(x) / sizeof(wchar_t) - 1)
@@ -221,18 +220,20 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateFile,
     __in      ULONG EaLength
 ) {
 	NTSTATUS ret;
-
+	BOOL file_existed;
 	check_for_logging_resumption(ObjectAttributes);
 
 	if (is_protected_objattr(ObjectAttributes))
 		return STATUS_ACCESS_DENIED;
 
-    ret = Old_NtCreateFile(FileHandle, DesiredAccess,
+	file_existed = file_exists(ObjectAttributes);
+	
+	ret = Old_NtCreateFile(FileHandle, DesiredAccess,
         ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes,
         ShareAccess | FILE_SHARE_READ, CreateDisposition, CreateOptions, EaBuffer, EaLength);
-    LOQ_ntstatus("filesystem", "PhOiih", "FileHandle", FileHandle, "DesiredAccess", DesiredAccess,
+    LOQ_ntstatus("filesystem", "PhOiihs", "FileHandle", FileHandle, "DesiredAccess", DesiredAccess,
         "FileName", ObjectAttributes, "CreateDisposition", CreateDisposition,
-        "ShareAccess", ShareAccess, "FileAttributes", FileAttributes);
+        "ShareAccess", ShareAccess, "FileAttributes", FileAttributes, "ExistedBefore", file_existed ? "yes" : "no");
     if(NT_SUCCESS(ret) && DesiredAccess & DUMP_FILE_MASK) {
         handle_new_file(*FileHandle, ObjectAttributes);
     }
@@ -264,6 +265,13 @@ HOOKDEF(NTSTATUS, WINAPI, NtOpenFile,
     return ret;
 }
 
+static HANDLE LastFileHandle;
+static ULONG AccumulatedLength;
+static LONG volatile init_readfile_critsec;
+static CRITICAL_SECTION readfile_critsec;
+static PVOID InitialBuffer;
+static SIZE_T InitialBufferLength;
+
 HOOKDEF(NTSTATUS, WINAPI, NtReadFile,
     __in      HANDLE FileHandle,
     __in_opt  HANDLE Event,
@@ -278,11 +286,41 @@ HOOKDEF(NTSTATUS, WINAPI, NtReadFile,
     NTSTATUS ret = Old_NtReadFile(FileHandle, Event, ApcRoutine, ApcContext,
         IoStatusBlock, Buffer, Length, ByteOffset, Key);
 	wchar_t *fname = calloc(32768, sizeof(wchar_t));
+	BOOLEAN deletelast;
+
+	if (!InterlockedExchange(&init_readfile_critsec, 1))
+		InitializeCriticalSection(&readfile_critsec);
 
 	path_from_handle(FileHandle, fname, 32768);
 
+	if (get_last_api() == API_NTREADFILE && FileHandle == LastFileHandle) {
+		// can overflow, but we don't care much
+		AccumulatedLength += (ULONG)IoStatusBlock->Information;
+		deletelast = TRUE;
+	}
+	else {
+		PVOID prev;
+		SIZE_T len = min(IoStatusBlock->Information, BUFFER_LOG_MAX);
+		PVOID newbuf;
+
+		EnterCriticalSection(&readfile_critsec);
+		newbuf = malloc(len);
+		memcpy(newbuf, Buffer, len);
+		prev = InitialBuffer;
+		InitialBuffer = newbuf;
+		if (prev)
+			free(prev);
+		LastFileHandle = FileHandle;
+		AccumulatedLength = (ULONG)IoStatusBlock->Information;
+		InitialBufferLength = len;
+		LeaveCriticalSection(&readfile_critsec);
+
+		deletelast = FALSE;
+	}
+	set_special_api(API_NTREADFILE, deletelast);
+
 	LOQ_ntstatus("filesystem", "pFbl", "FileHandle", FileHandle,
-		"HandleName", fname, "Buffer", IoStatusBlock->Information, Buffer, "Length", IoStatusBlock->Information);
+		"HandleName", fname, "Buffer", InitialBufferLength, InitialBuffer, "Length", AccumulatedLength);
 
 	free(fname);
 
@@ -358,18 +396,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtDeviceIoControlFile,
         "InputBuffer", InputBufferLength, InputBuffer,
         "OutputBuffer", IoStatusBlock->Information, OutputBuffer);
 
-	/* Fake harddrive size to 256GB */
-	if (NT_SUCCESS(ret) && OutputBuffer && OutputBufferLength >= sizeof(GET_LENGTH_INFORMATION) && IoControlCode == IOCTL_DISK_GET_LENGTH_INFO) {
-		((PGET_LENGTH_INFORMATION)OutputBuffer)->Length.QuadPart = 256060514304L;
-	}
-	/* fake model name */
-	if (NT_SUCCESS(ret) && IoControlCode == IOCTL_STORAGE_QUERY_PROPERTY && OutputBuffer && OutputBufferLength > 4) {
-		ULONG i;
-		for (i = 0; i < OutputBufferLength - 4; i++) {
-			if (!memcmp(&((PCHAR)OutputBuffer)[i], "QEMU", 4))
-				memcpy(&((PCHAR)OutputBuffer)[i], "DELL", 4);
-		}
-	}
+	if (!g_config.no_stealth && NT_SUCCESS(ret) && OutputBuffer)
+		perform_device_fakery(OutputBuffer, OutputBufferLength, IoControlCode);
+
 	return ret;
 }
 
@@ -612,10 +641,15 @@ HOOKDEF(BOOL, WINAPI, CopyFileA,
     __in  LPCSTR lpNewFileName,
     __in  BOOL bFailIfExists
 ) {
-    BOOL ret = Old_CopyFileA(lpExistingFileName, lpNewFileName,
+	BOOL ret;
+	BOOL file_existed = FALSE;
+	if (GetFileAttributesA(lpNewFileName) != INVALID_FILE_ATTRIBUTES)
+		file_existed = TRUE;
+
+	ret = Old_CopyFileA(lpExistingFileName, lpNewFileName,
         bFailIfExists);
-	LOQ_bool("filesystem", "ff", "ExistingFileName", lpExistingFileName,
-        "NewFileName", lpNewFileName);
+	LOQ_bool("filesystem", "ffs", "ExistingFileName", lpExistingFileName,
+        "NewFileName", lpNewFileName, "ExistedBefore", file_existed ? "yes" : "no");
 
 	if (ret)
 		new_file_path_ascii(lpNewFileName);
@@ -628,10 +662,15 @@ HOOKDEF(BOOL, WINAPI, CopyFileW,
     __in  LPWSTR lpNewFileName,
     __in  BOOL bFailIfExists
 ) {
-    BOOL ret = Old_CopyFileW(lpExistingFileName, lpNewFileName,
+	BOOL ret;
+	BOOL file_existed = FALSE;
+	if (GetFileAttributesW(lpNewFileName) != INVALID_FILE_ATTRIBUTES)
+		file_existed = TRUE;
+
+	ret = Old_CopyFileW(lpExistingFileName, lpNewFileName,
         bFailIfExists);
-	LOQ_bool("filesystem", "FF", "ExistingFileName", lpExistingFileName,
-        "NewFileName", lpNewFileName);
+	LOQ_bool("filesystem", "FFs", "ExistingFileName", lpExistingFileName,
+		"NewFileName", lpNewFileName, "ExistedBefore", file_existed ? "yes" : "no");
 
 	if (ret)
 		new_file_path_unicode(lpNewFileName);
@@ -647,10 +686,15 @@ HOOKDEF(BOOL, WINAPI, CopyFileExW,
     _In_opt_  LPBOOL pbCancel,
     _In_      DWORD dwCopyFlags
 ) {
-    BOOL ret = Old_CopyFileExW(lpExistingFileName, lpNewFileName,
+	BOOL ret;
+	BOOL file_existed = FALSE;
+	if (GetFileAttributesW(lpNewFileName) != INVALID_FILE_ATTRIBUTES)
+		file_existed = TRUE;
+
+	ret = Old_CopyFileExW(lpExistingFileName, lpNewFileName,
         lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
-	LOQ_bool("filesystem", "FFi", "ExistingFileName", lpExistingFileName,
-        "NewFileName", lpNewFileName, "CopyFlags", dwCopyFlags);
+	LOQ_bool("filesystem", "FFis", "ExistingFileName", lpExistingFileName,
+        "NewFileName", lpNewFileName, "CopyFlags", dwCopyFlags, file_existed ? "yes" : "no");
 
 	if (ret)
 		new_file_path_unicode(lpNewFileName);
@@ -705,6 +749,12 @@ HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceExA,
 ) {
     BOOL ret = Old_GetDiskFreeSpaceExA(lpDirectoryName, lpFreeBytesAvailable, lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
 	LOQ_bool("filesystem", "s", "DirectoryName", lpDirectoryName);
+	
+	/* Fake harddrive size to 256GB */
+	if (!g_config.no_stealth && ret) {
+		lpTotalNumberOfBytes->QuadPart = 256060514304L;
+	}
+
     return ret;
 }
 
@@ -716,7 +766,13 @@ HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceExW,
 ) {
     BOOL ret = Old_GetDiskFreeSpaceExW(lpDirectoryName, lpFreeBytesAvailable, lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
 	LOQ_bool("filesystem", "u", "DirectoryName", lpDirectoryName);
-    return ret;
+
+	/* Fake harddrive size to 256GB */
+	if (!g_config.no_stealth && ret) {
+		lpTotalNumberOfBytes->QuadPart = 256060514304L;
+	}
+
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceA,
@@ -728,7 +784,13 @@ HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceA,
 ) {
     BOOL ret = Old_GetDiskFreeSpaceA(lpRootPathName, lpSectorsPerCluster, lpBytesPerSector, lpNumberOfFreeClusters, lpTotalNumberOfClusters);
 	LOQ_bool("filesystem", "s", "RootPathName", lpRootPathName);
-    return ret;
+
+	/* Fake harddrive size to 256GB */
+	if (!g_config.no_stealth && *lpSectorsPerCluster && *lpBytesPerSector) {
+		*lpTotalNumberOfClusters = (DWORD)(256060514304L / (*lpSectorsPerCluster * *lpBytesPerSector));
+	}
+
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceW,
@@ -740,7 +802,13 @@ HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceW,
 ) {
     BOOL ret = Old_GetDiskFreeSpaceW(lpRootPathName, lpSectorsPerCluster, lpBytesPerSector, lpNumberOfFreeClusters, lpTotalNumberOfClusters);
 	LOQ_bool("filesystem", "u", "RootPathName", lpRootPathName);
-    return ret;
+
+	/* Fake harddrive size to 256GB */
+	if (!g_config.no_stealth && *lpSectorsPerCluster && *lpBytesPerSector) {
+		*lpTotalNumberOfClusters = (DWORD)(256060514304L / (*lpSectorsPerCluster * *lpBytesPerSector));
+	}
+
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, GetVolumeNameForVolumeMountPointW,
@@ -750,13 +818,12 @@ HOOKDEF(BOOL, WINAPI, GetVolumeNameForVolumeMountPointW,
 ) {
 	BOOL ret = Old_GetVolumeNameForVolumeMountPointW(lpszVolumeMountPoint, lpszVolumeName, cchBufferLength);
 	LOQ_bool("filesystem", "uu", "VolumeMountPoint", lpszVolumeMountPoint, "VolumeName", lpszVolumeName);
-	if (ret && lpszVolumeName && cchBufferLength > 4) {
-		DWORD i;
-		for (i = 0; i < cchBufferLength - 4; i++) {
-			if (!memcmp(&lpszVolumeName[i], L"QEMU", 8))
-				memcpy(&lpszVolumeName[i], L"DELL", 8);
-		}
+	if (!g_config.no_stealth && ret) {
+		replace_wstring_in_buf(lpszVolumeName, cchBufferLength, L"QEMU", L"DELL");
+		replace_wstring_in_buf(lpszVolumeName, cchBufferLength, L"VMware", L"DELL__");
+		replace_wstring_in_buf(lpszVolumeName, cchBufferLength, L"VMWar", L"WDRed");
 	}
+
 	return ret;
 }
 
@@ -780,7 +847,7 @@ HOOKDEF(BOOL, WINAPI, GetFileVersionInfoW,
 ) {
 	BOOL ret = Old_GetFileVersionInfoW(lptstrFilename, dwHandle, dwLen, lpData);
 
-	if (lptstrFilename && lstrlenW(lptstrFilename) > 3 && lptstrFilename[1] == L':' && lptstrFilename[2] == L'\\')
+	if (lptstrFilename && lstrlenW(lptstrFilename) > 3 && lptstrFilename[1] == L':' && (lptstrFilename[2] == L'\\' || lptstrFilename[2] == L'/'))
 		LOQ_bool("filesystem", "F", "PathName", lptstrFilename);
 	else
 		LOQ_bool("filesystem", "u", "PathName", lptstrFilename);
@@ -793,7 +860,7 @@ HOOKDEF(DWORD, WINAPI, GetFileVersionInfoSizeW,
 ) {
 	DWORD ret = Old_GetFileVersionInfoSizeW(lptstrFilename, lpdwHandle);
 
-	if (lptstrFilename && lstrlenW(lptstrFilename) > 3 && lptstrFilename[1] == L':' && lptstrFilename[2] == L'\\')
+	if (lptstrFilename && lstrlenW(lptstrFilename) > 3 && lptstrFilename[1] == L':' && (lptstrFilename[2] == L'\\' || lptstrFilename[2] == L'/'))
 		LOQ_nonzero("filesystem", "F", "PathName", lptstrFilename);
 	else
 		LOQ_nonzero("filesystem", "u", "PathName", lptstrFilename);

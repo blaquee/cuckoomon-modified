@@ -30,17 +30,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // the size of the logging buffer
 #define BUFFERSIZE 16 * 1024 * 1024
-#define BUFFER_LOG_MAX 256
 #define LARGE_BUFFER_LOG_MAX 2048
 #define BUFFER_REGVAL_MAX 512
 
 static CRITICAL_SECTION g_mutex;
 static CRITICAL_SECTION g_writing_log_buffer_mutex;
 static SOCKET g_sock;
+static HANDLE g_debug_log_handle;
 static unsigned int g_starttick;
 
 static char *g_buffer;
 static volatile int g_idx;
+static DWORD last_api_logged;
+static BOOLEAN special_api_triggered;
+static BOOLEAN delete_last_log;
+HANDLE g_log_handle;
 
 // current to-be-logged API call
 static bson g_bson[1];
@@ -52,6 +56,9 @@ static char logtbl_explained[256] = {0};
 #define LOG_ID_THREAD 1
 #define LOG_ID_ANOMALY 2
 #define LOG_ID_ANOMALY_EXTRA 3
+#define LOG_ID_ENVIRON 4
+// must be one larger than the largeest log ID
+#define LOG_ID_PREDEFINED_MAX 5
 
 int g_log_index = 10;  // index must start after the special IDs (see defines)
 
@@ -72,25 +79,25 @@ static void _send_log(void)
 		int written = -1;
 
 		if (g_sock == DEBUG_SOCKET) {
-			char filename[64];
-			char pid[8];
-			FILE *f;
-
-			strcpy(filename, "c:\\debug");
-			num_to_string(pid, sizeof(pid), GetCurrentProcessId());
-			strcat(filename, pid);
-			strcat(filename, ".log");
-			// will happen when we're in debug mode
-			f = fopen(filename, "ab");
-			if (f) {
-				written = (int)fwrite(g_buffer, 1, g_idx, f);
-				fclose(f);
+			if (g_debug_log_handle != INVALID_HANDLE_VALUE) {
+				WriteFile(g_debug_log_handle, g_buffer, g_idx, &written, NULL);
 			}
 			else {
 				// some non-admin debug case
 				written = g_idx;
 			}
 		}
+		else {
+			if (g_log_handle == INVALID_HANDLE_VALUE) {
+				g_idx = 0;
+				continue;
+			}
+			else {
+				WriteFile(g_log_handle, g_buffer, g_idx, &written, NULL);
+			}
+		}
+		/*
+		// old style logging
 		else if (g_sock == INVALID_SOCKET) {
 			g_idx = 0;
 			continue;
@@ -98,6 +105,7 @@ static void _send_log(void)
 		else {
 			written = send(g_sock, g_buffer, g_idx, 0);
 		}
+		*/
 
 		if (written < 0)
 			continue;
@@ -146,16 +154,21 @@ void log_flush()
 	There's thus an implicit assumption here that we won't log more than BUFFERSIZE before
 	DllMain completes, otherwise we'll lose logs.
 	*/
-	if (g_dll_main_complete) {
-		SetEvent(g_log_flush);
-		while (g_idx && (g_sock != INVALID_SOCKET || !process_shutting_down)) raw_sleep(50);
-	}
-	else {
+	//if (g_dll_main_complete && !process_shutting_down) {
+	//	SetEvent(g_log_flush);
+	//	while (g_idx && (g_sock != INVALID_SOCKET)) raw_sleep(50);
+	//}
+	//else {
 		/* if we're in main() still, then send the logs immediately just in case something bad
 		   happens early in execution of the malware's code
 		 */
+
+	//}
+	// we might get called by the pipe() code trying to flush logs before logging is
+	// actually initialized, so avoid any nastiness on trying to use unitialized
+	// critical sections
+	if (g_buffer)
 		_send_log();
-	}
 }
 
 static void log_raw_direct(const char *buf, size_t length) {
@@ -306,6 +319,19 @@ static void log_large_buffer(const char *buf, size_t length) {
 	bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY, buf, trunclength);
 }
 
+void set_special_api(DWORD API, BOOLEAN deleteLastLog)
+{
+	EnterCriticalSection(&g_mutex);
+	special_api_triggered = TRUE;
+	last_api_logged = API;
+	delete_last_log = deleteLastLog;
+	LeaveCriticalSection(&g_mutex);
+}
+DWORD get_last_api(void)
+{
+	return last_api_logged;
+}
+
 static lastlog_t lastlog;
 
 void loq(int index, const char *category, const char *name,
@@ -320,12 +346,22 @@ void loq(int index, const char *category, const char *name,
 	lasterror_t lasterror;
 	hook_info_t *hookinfo;
 
-	if (index >= LOG_ID_ANOMALY && g_config.suspend_logging)
+	if (index >= LOG_ID_PREDEFINED_MAX && g_config.suspend_logging)
 		return;
 
 	get_lasterrors(&lasterror);
 
 	EnterCriticalSection(&g_mutex);
+
+	if (!special_api_triggered)
+		last_api_logged = API_OTHER;
+	else {
+		special_api_triggered = FALSE;
+		if (delete_last_log) {
+			free(lastlog.buf);
+			lastlog.buf = NULL;
+		}
+	}
 
 	if(logtbl_explained[index] == 0) {
         const char * pname;
@@ -689,41 +725,125 @@ void loq(int index, const char *category, const char *name,
                 log_string("", 0);
             }
             else if(type == REG_DWORD || type == REG_DWORD_LITTLE_ENDIAN) {
-                unsigned int value = *(unsigned int *) data;
+				unsigned int value = 0;
+				if (data)
+					value = *(unsigned int *)data;
                 log_int32(value);
             }
             else if(type == REG_DWORD_BIG_ENDIAN) {
-                unsigned int value = *(unsigned int *) data;
-                log_int32(htonl(value));
+				unsigned int value = 0;
+				if (data)
+					value = *(unsigned int *)data;
+                log_int32(our_htonl(value));
             }
-            else if(type == REG_EXPAND_SZ || type == REG_SZ) {
+			else if (type == REG_EXPAND_SZ || type == REG_SZ) {
 
-                if(data == NULL) {
-                    bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
-                        (const char *) data, 0);
-                }
-                // ascii strings
-                else if(key == 'r') {
-					if (size >= 1 && data[size - 1] == '\0')
-						log_string(data, size - 1);
-					else
-						log_string(data, size);
-                    //bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
-                    //    (const char *) data, size);
-                }
-                // unicode strings
-                else {
+				if (data == NULL) {
+					bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
+						(const char *)data, 0);
+				}
+				// ascii strings
+				else if (key == 'r') {
+					int len = (int)strnlen(data, size);
+					log_string(data, len);
+				}
+				// unicode strings
+				else {
 					const wchar_t *wdata = (const wchar_t *)data;
-					if (size >= 2 && wdata[(size / sizeof(wchar_t)) - 1] == L'\0')
-						log_wstring(wdata, (size / sizeof(wchar_t)) - 1);
-					else
-						log_wstring(wdata, size / sizeof(wchar_t));
-                    //bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
-                    //    (const char *) data, size);
-                }
-            } else {
-                bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
-                    (const char *) data, 0);
+					int len = (int)wcsnlen(wdata, size / sizeof(wchar_t));
+					log_wstring(wdata, len);
+				}
+			} else if (type == REG_MULTI_SZ) {
+				if (data == NULL) {
+					bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
+						(const char *)data, 0);
+				}
+				else if ((type == 'r' && size < 2) || (type == 'R' && size < 4))
+					goto buffer_log;
+				// ascii strings
+				else if (key == 'r') {
+					unsigned long i, x;
+					unsigned int strcnt = 0;
+					int found_doublenull = 0;
+					char *p;
+					int len;
+					for (i = 0; i < size - 1; i++) {
+						if (data[i] == '\0')
+							strcnt++;
+						if (data[i + 1] == '\0') {
+							found_doublenull = 1;
+							break;
+						}
+					}
+					if (!found_doublenull)
+						goto buffer_log;
+					p = (char *)malloc(size + (strcnt * 4));
+					if (p == NULL)
+						goto buffer_log;
+					for (i = 0, x = 0; i < size - 1; i++) {
+						if (data[i] == '\0') {
+							p[x++] = '\\';
+							p[x++] = 'x';
+							p[x++] = '0';
+							p[x++] = '0';
+							if (data[i + 1] == '\0') {
+								p[x++] = '\0';
+								break;
+							}
+						}
+						else {
+							p[x] = data[i];
+						}
+					}
+					len = (int)strnlen(p, size + (strcnt * 4));
+					log_string(p, len);
+					free(p);
+				}
+				// unicode strings
+				else {
+					unsigned long i, x;
+					unsigned int strcnt = 0;
+					int found_doublenull = 0;
+					const wchar_t *wdata = (const wchar_t *)data;
+					wchar_t *p;
+					int len;
+					for (i = 0; i < (size/sizeof(wchar_t)) - 1; i++) {
+						if (wdata[i] == L'\0')
+							strcnt++;
+						if (wdata[i + 1] == L'\0') {
+							found_doublenull = 1;
+							break;
+						}
+					}
+					if (!found_doublenull)
+						goto buffer_log;
+					p = (wchar_t *)malloc(size + (strcnt * 4 * sizeof(wchar_t)));
+					if (p == NULL)
+						goto buffer_log;
+					for (i = 0, x = 0; i < (size/sizeof(wchar_t)) - 1; i++) {
+						if (wdata[i] == '\0') {
+							p[x++] = L'\\';
+							p[x++] = L'x';
+							p[x++] = L'0';
+							p[x++] = L'0';
+							if (wdata[i + 1] == L'\0') {
+								p[x++] = L'\0';
+								break;
+							}
+						}
+						else {
+							p[x] = data[i];
+						}
+					}
+					len = (int)wcsnlen(p, (size/sizeof(wchar_t)) + (strcnt * 4));
+					log_wstring(p, len);
+					free(p);
+				}
+			}
+			else {
+buffer_log:
+				bson_append_binary(g_bson, g_istr, BSON_BIN_BINARY,
+                    (const char *) data, size);
             }
 
             // bson_append_finish_object( g_bson );
@@ -735,28 +855,36 @@ void loq(int index, const char *category, const char *name,
     bson_append_finish_array( g_bson );
     bson_finish( g_bson );
 
-	if (lastlog.buf) {
-		unsigned int our_len = bson_size(g_bson) - compare_offset;
-		if (lastlog.compare_len == our_len && !memcmp(lastlog.compare_ptr, bson_data(g_bson) + compare_offset, our_len)) {
-			// we're about to log a duplicate of the last log message, just increment the previous log's repeated count
-			(*lastlog.repeated_ptr)++;
-		}
-		else {
-			log_raw_direct(lastlog.buf, lastlog.len);
-			free(lastlog.buf);
-			lastlog.buf = NULL;
-		}
+	if (index == LOG_ID_PROCESS || index == LOG_ID_THREAD || index == LOG_ID_ENVIRON) {
+		// don't hold back any of our critical notifications -- these *must* be flushed in log_init()
+		log_raw_direct(bson_data(g_bson), bson_size(g_bson));
 	}
-	if (lastlog.buf == NULL) {
-		lastlog.len = bson_size(g_bson);
-		lastlog.buf = malloc(lastlog.len);
-		memcpy(lastlog.buf, bson_data(g_bson), lastlog.len);
-		lastlog.compare_len = lastlog.len - compare_offset;
-		lastlog.compare_ptr = lastlog.buf + compare_offset;
-		lastlog.repeated_ptr = (int *)(lastlog.buf + repeat_offset);
+	else {
+		if (lastlog.buf) {
+			unsigned int our_len = bson_size(g_bson) - compare_offset;
+			if (lastlog.compare_len == our_len && !memcmp(lastlog.compare_ptr, bson_data(g_bson) + compare_offset, our_len)) {
+				// we're about to log a duplicate of the last log message, just increment the previous log's repeated count
+				(*lastlog.repeated_ptr)++;
+			}
+			else {
+				log_raw_direct(lastlog.buf, lastlog.len);
+				free(lastlog.buf);
+				lastlog.buf = NULL;
+				// flush logs once we're done seeing duplicates of a particular API
+				//log_flush();
+			}
+		}
+		if (lastlog.buf == NULL) {
+			lastlog.len = bson_size(g_bson);
+			lastlog.buf = malloc(lastlog.len);
+			memcpy(lastlog.buf, bson_data(g_bson), lastlog.len);
+			lastlog.compare_len = lastlog.len - compare_offset;
+			lastlog.compare_ptr = lastlog.buf + compare_offset;
+			lastlog.repeated_ptr = (int *)(lastlog.buf + repeat_offset);
+		}
 	}
 
-    bson_destroy( g_bson );
+	bson_destroy( g_bson );
     LeaveCriticalSection(&g_mutex);
 
 	//log_flush();
@@ -779,7 +907,7 @@ void log_new_process()
 
     GetSystemTimeAsFileTime(&st);
 
-    loq(LOG_ID_PROCESS, "__notification__", "__process__", 1, 0, "llllu",
+    loq(LOG_ID_PROCESS, "__notification__", "__process__", 1, 0, "iiiiu",
         "TimeLow", st.dwLowDateTime,
         "TimeHigh", st.dwHighDateTime,
         "ProcessIdentifier", GetCurrentProcessId(),
@@ -793,15 +921,125 @@ void log_new_thread()
         "ProcessIdentifier", GetCurrentProcessId());
 }
 
-void log_anomaly(const char *subcategory, int success,
+static int get_registry_string(HKEY hKey, char *subkey, char *value, char *outbuf, DWORD insize)
+{
+	HKEY outkey;
+	DWORD regtype;
+	DWORD outlen;
+	LONG ret;
+
+	memset(outbuf, 0, insize);
+
+	ret = RegOpenKeyExA(hKey, subkey, 0, KEY_READ, &outkey);
+	if (ret)
+		return ret;
+	ret = RegQueryValueExA(outkey, value, NULL, &regtype, outbuf, &outlen);
+	RegCloseKey(outkey);
+	return ret;
+}
+
+void log_environ()
+{
+	char *username, *computername, *winpath, *tmppath;
+	char *sysvolserial, *sysvolguid, *machineguid;
+	char *registeredowner, *registeredorg;
+	char *productname;
+	char *p;
+	char tmp[1024];
+	HMODULE mainbase = GetModuleHandleA(NULL);
+	DWORD installdate;
+	DWORD volser;
+	OSVERSIONINFOA osverinfo;
+	DWORD tmpsize = sizeof(tmp);
+
+	memset(tmp, 0, sizeof(tmp));
+	GetUserNameA(tmp, &tmpsize);
+	username = strdup(tmp);
+	memset(tmp, 0, sizeof(tmp));
+	tmpsize = sizeof(tmp);
+	GetComputerNameA(tmp, &tmpsize);
+	computername = strdup(tmp);
+	get_registry_string(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion", "InstallDate", tmp, sizeof(tmp));
+	installdate = *(DWORD *)tmp;
+	get_registry_string(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion", "RegisteredOwner", tmp, sizeof(tmp));
+	registeredowner = strdup(tmp);
+	get_registry_string(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion", "RegisteredOrganization", tmp, sizeof(tmp));
+	registeredorg = strdup(tmp);
+	get_registry_string(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion", "ProductName", tmp, sizeof(tmp));
+	productname = strdup(tmp);
+	memset(tmp, 0, sizeof(tmp));
+	GetWindowsDirectoryA(tmp, sizeof(tmp));
+	winpath = strdup(tmp);
+	memset(tmp, 0, sizeof(tmp));
+	GetTempPathA(sizeof(tmp), tmp);
+	tmppath = strdup(tmp);
+	get_registry_string(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Cryptography", "MachineGuid", tmp, sizeof(tmp));
+	machineguid = strdup(tmp);
+	memset(tmp, 0, sizeof(tmp));
+	GetVolumeInformationA("C:\\", NULL, 0, &volser, NULL, NULL, NULL, 0);
+	sprintf(tmp, "%04x-%04x", HIWORD(volser), LOWORD(volser));
+	sysvolserial = strdup(tmp);
+	memset(tmp, 0, sizeof(tmp));
+	GetVolumeNameForVolumeMountPointA("C:\\", tmp, sizeof(tmp));
+	p = strchr(tmp, '}');
+	if (p)
+		*p = '\0';
+	p = strchr(tmp, '{');
+	if (p)
+		sysvolguid = strdup(p + 1);
+	else
+		sysvolguid = strdup("");
+
+	osverinfo.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
+	GetVersionEx(&osverinfo);
+	
+	loq(LOG_ID_ENVIRON, "__notification__", "__environ__", 1, 0, "ssisssssiisssph",
+		"UserName", username,
+		"ComputerName", computername,
+		"InstallDate", installdate,
+		"WindowsPath", winpath,
+		"TempPath", tmppath,
+		"RegisteredOwner", registeredowner,
+		"RegisteredOrganization", registeredorg,
+		"ProductName", productname,
+		"OSMajor", osverinfo.dwMajorVersion,
+		"OSMinor", osverinfo.dwMinorVersion,
+		"SystemVolumeSerialNumber", sysvolserial,
+		"SystemVolumeGUID", sysvolguid,
+		"MachineGUID", machineguid,
+		"MainExeBase", mainbase,
+		"MainExeSize", get_image_size((ULONG_PTR)mainbase)
+		);
+
+	free(username);
+	free(computername);
+	free(winpath);
+	free(tmppath);
+	free(productname);
+	free(registeredowner);
+	free(registeredorg);
+	free(sysvolserial);
+	free(sysvolguid);
+	free(machineguid);
+}
+void log_hook_anomaly(const char *subcategory, int success,
     const char *funcname, const char *msg)
 {
-    loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", success, 0, "lsss",
+    loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", success, 0, "isss",
         "ThreadIdentifier", GetCurrentThreadId(),
         "Subcategory", subcategory,
         "FunctionName", funcname,
         "Message", msg);
 }
+
+void log_anomaly(const char *subcategory, const char *msg)
+{
+	loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", 1, 0, "iss",
+		"ThreadIdentifier", GetCurrentThreadId(),
+		"Subcategory", subcategory,
+		"Message", msg);
+}
+
 
 void log_hook_modification(const char *funcname, const char *origbytes, const char *newbytes, unsigned int len)
 {
@@ -810,16 +1048,16 @@ void log_hook_modification(const char *funcname, const char *origbytes, const ch
 	char *p;
 	unsigned int i;
 
-	for (i = 0; i < len && i < 124/3; i++) {
+	for (i = 0; (i < len) && (i < 124/3); i++) {
 		p = &msg1[i * 3];
 		sprintf(p, "%02X ", (unsigned char)origbytes[i]);
 	}
-	for (i = 0; i < len && i < 124 / 3; i++) {
+	for (i = 0; (i < len) && (i < 124 / 3); i++) {
 		p = &msg2[i * 3];
 		sprintf(p, "%02X ", (unsigned char)newbytes[i]);
 	}
 
-	loq(LOG_ID_ANOMALY_EXTRA, "__notification__", "__anomaly__", 1, 0, "lsssss",
+	loq(LOG_ID_ANOMALY_EXTRA, "__notification__", "__anomaly__", 1, 0, "isssss",
 		"ThreadIdentifier", GetCurrentThreadId(),
 		"Subcategory", "unhook",
 		"FunctionName", funcname,
@@ -830,7 +1068,7 @@ void log_hook_modification(const char *funcname, const char *origbytes, const ch
 
 void log_hook_removal(const char *funcname)
 {
-	loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", 1, 0, "lsss",
+	loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", 1, 0, "isss",
 		"ThreadIdentifier", GetCurrentThreadId(),
 		"Subcategory", "unhook",
 		"FunctionName", funcname,
@@ -839,7 +1077,7 @@ void log_hook_removal(const char *funcname)
 
 void log_hook_restoration(const char *funcname)
 {
-	loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", 1, 0, "lsss",
+	loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", 1, 0, "isss",
 		"ThreadIdentifier", GetCurrentThreadId(),
 		"Subcategory", "unhook",
 		"FunctionName", funcname,
@@ -847,7 +1085,10 @@ void log_hook_restoration(const char *funcname)
 }
 
 
-void log_init(unsigned int ip, unsigned short port, int debug)
+DWORD g_log_thread_id;
+DWORD g_logwatcher_thread_id;
+
+void log_init(int debug)
 {
 	g_buffer = calloc(1, BUFFERSIZE);
 
@@ -858,8 +1099,18 @@ void log_init(unsigned int ip, unsigned short port, int debug)
 
 	if(debug != 0) {
         g_sock = DEBUG_SOCKET;
-    }
-    else {
+	}
+	else {
+		g_sock = INVALID_SOCKET;
+		g_log_handle = CreateFileA(g_config.logserver, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+		if (g_log_handle == INVALID_HANDLE_VALUE) {
+			pipe("CRITICAL:Error initializing logging!");
+			return;
+		}
+	}
+	/*
+	// old style logging
+	else {
         WSADATA wsa;
 		struct sockaddr_in addr;
 
@@ -877,21 +1128,38 @@ void log_init(unsigned int ip, unsigned short port, int debug)
 			g_sock = DEBUG_SOCKET;
 		}
     }
+	*/
 
+	if (g_sock == DEBUG_SOCKET) {
+		char filename[64];
+		char pid[8];
+
+		strcpy(filename, "c:\\debug");
+		num_to_string(pid, sizeof(pid), GetCurrentProcessId());
+		strcat(filename, pid);
+		strcat(filename, ".log");
+		// will happen when we're in debug mode
+		g_debug_log_handle = CreateFileA(filename, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW, 0, NULL);
+	}
+
+	/*
+	// old style logging
 	g_log_thread_handle =
-		CreateThread(NULL, 0, &_log_thread, NULL, 0, NULL);
+		CreateThread(NULL, 0, &_log_thread, NULL, 0, &g_log_thread_id);
 
 	g_logwatcher_thread_handle =
-		CreateThread(NULL, 0, &_logwatcher_thread, NULL, 0, NULL);
+		CreateThread(NULL, 0, &_logwatcher_thread, NULL, 0, &g_logwatcher_thread_id);
 
 	if (g_log_thread_handle == NULL || g_logwatcher_thread_handle == NULL) {
 		pipe("CRITICAL:Error initializing logging threads!");
 		return;
 	}
+	*/
 
 	announce_netlog();
     log_new_process();
     log_new_thread();
+	log_environ();
     // flushing here so host can create files / keep timestamps
     log_flush();
 }
@@ -905,9 +1173,25 @@ void log_free()
 		lastlog.buf = NULL;
 	}
     log_flush();
-	if (g_sock != INVALID_SOCKET && g_sock != DEBUG_SOCKET) {
-        closesocket(g_sock);
+	if (g_sock == DEBUG_SOCKET) {
 		g_sock = INVALID_SOCKET;
-		WSACleanup();
-    }
+	}
+	else {
+		CloseHandle(g_log_handle);
+		g_log_handle = INVALID_HANDLE_VALUE;
+	}
+
+	/*
+	// old logging method
+	if (g_sock != INVALID_SOCKET) {
+		if (g_sock == DEBUG_SOCKET) {
+			g_sock = INVALID_SOCKET;
+		}
+		else {
+			closesocket(g_sock);
+			g_sock = INVALID_SOCKET;
+			WSACleanup();
+		}
+	}
+	*/
 }

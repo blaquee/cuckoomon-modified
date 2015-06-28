@@ -23,6 +23,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "pipe.h"
 #include "misc.h"
 #include "hook_sleep.h"
+#include "unhook.h"
 
 HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThread,
 	__in HANDLE ThreadHandle,
@@ -193,11 +194,22 @@ HOOKDEF(NTSTATUS, WINAPI, NtSuspendThread,
 	DWORD tid = tid_from_thread_handle(ThreadHandle);
 	NTSTATUS ret;
 	ENSURE_ULONG(PreviousSuspendCount);
-	pipe("PROCESS:%d:%d,%d", is_suspended(pid, tid), pid, tid);
 
-	ret = Old_NtSuspendThread(ThreadHandle, PreviousSuspendCount);
-    LOQ_ntstatus("threading", "pL", "ThreadHandle", ThreadHandle,
-        "SuspendCount", PreviousSuspendCount);
+	if (pid == GetCurrentProcessId() && tid && (tid == g_unhook_detect_thread_id || tid == g_unhook_watcher_thread_id ||
+		tid == g_watchdog_thread_id || tid == g_terminate_event_thread_id || tid == g_log_thread_id ||
+		tid == g_logwatcher_thread_id)) {
+		ret = 0;
+		*PreviousSuspendCount = 0;
+		LOQ_ntstatus("threading", "pLs", "ThreadHandle", ThreadHandle,
+			"SuspendCount", PreviousSuspendCount, "Alert", "Attempted to suspend cuckoomon thread");
+	}
+	else {
+		pipe("PROCESS:%d:%d,%d", is_suspended(pid, tid), pid, tid);
+
+		ret = Old_NtSuspendThread(ThreadHandle, PreviousSuspendCount);
+		LOQ_ntstatus("threading", "pL", "ThreadHandle", ThreadHandle,
+			"SuspendCount", PreviousSuspendCount);
+	}
     return ret;
 }
 
@@ -221,8 +233,19 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateThread,
     __in  NTSTATUS ExitStatus
 ) {
     // Thread will terminate. Default logging will not work. Be aware: return value not valid
-    NTSTATUS ret = 0;
-    LOQ_ntstatus("threading", "ph", "ThreadHandle", ThreadHandle, "ExitStatus", ExitStatus);
+	DWORD pid = pid_from_thread_handle(ThreadHandle);
+	DWORD tid = tid_from_thread_handle(ThreadHandle);
+	NTSTATUS ret = 0;
+
+	if (pid == GetCurrentProcessId() && tid && (tid == g_unhook_detect_thread_id || tid == g_unhook_watcher_thread_id ||
+		tid == g_watchdog_thread_id || tid == g_terminate_event_thread_id || tid == g_log_thread_id ||
+		tid == g_logwatcher_thread_id)) {
+		ret = 0;
+		LOQ_ntstatus("threading", "phs", "ThreadHandle", ThreadHandle, "ExitStatus", ExitStatus, "Alert", "Attempted to kill cuckoomon thread");
+		return ret;
+	}
+
+	LOQ_ntstatus("threading", "ph", "ThreadHandle", ThreadHandle, "ExitStatus", ExitStatus);
     ret = Old_NtTerminateThread(ThreadHandle, ExitStatus);    
     return ret;
 }

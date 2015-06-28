@@ -51,7 +51,7 @@ typedef NTSTATUS(WINAPI *_NtDelayExecution)(
 
 void resolve_runtime_apis(void);
 
-ULONG_PTR parent_process_id(); // By Napalm @ NetCore2K (rohitab.com)
+DWORD parent_process_id(); // By Napalm @ NetCore2K (rohitab.com)
 DWORD pid_from_process_handle(HANDLE process_handle);
 DWORD pid_from_thread_handle(HANDLE thread_handle);
 DWORD tid_from_thread_handle(HANDLE thread_handle);
@@ -59,6 +59,7 @@ DWORD random();
 void raw_sleep(int msecs);
 DWORD randint(DWORD min, DWORD max);
 BOOL is_directory_objattr(const OBJECT_ATTRIBUTES *obj);
+BOOL file_exists(const OBJECT_ATTRIBUTES *obj);
 void hide_module_from_peb(HMODULE module_handle);
 BOOLEAN is_suspended(DWORD pid, DWORD tid);
 
@@ -123,3 +124,21 @@ extern DWORD g_our_dll_size;
 void num_to_string(char *buf, unsigned int buflen, unsigned int num);
 
 DWORD get_image_size(ULONG_PTR base);
+
+ULONG_PTR get_jseval_addr(HMODULE mod);
+ULONG_PTR get_cdocument_write_addr(HMODULE mod);
+ULONG_PTR get_olescript_compile_addr(HMODULE mod);
+
+void replace_string_in_buf(PCHAR buf, ULONG len, PCHAR findstr, PCHAR repstr);
+void replace_wstring_in_buf(PWCHAR buf, ULONG len, PWCHAR findstr, PWCHAR repstr);
+void replace_ci_string_in_buf(PCHAR buf, ULONG len, PCHAR findstr, PCHAR repstr);
+void replace_ci_wstring_in_buf(PWCHAR buf, ULONG len, PWCHAR findstr, PWCHAR repstr);
+void perform_ascii_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength);
+void perform_unicode_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength);
+void perform_device_fakery(PVOID OutputBuffer, ULONG OutputBufferLength, ULONG IoControlCode);
+
+unsigned short our_htons(unsigned short num);
+unsigned int our_htonl(unsigned int num);
+void addr_to_string(const IN_ADDR addr, char *string);
+
+PUNICODE_STRING get_basename_of_module(HMODULE module_handle);

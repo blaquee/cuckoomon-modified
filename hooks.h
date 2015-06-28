@@ -679,7 +679,31 @@ extern HOOKDEF(BOOL, WINAPI, SendNotifyMessageW,
 	_In_  UINT Msg,
 	_In_  WPARAM wParam,
 	_In_  LPARAM lParam
-	);
+);
+
+extern HOOKDEF(LONG, WINAPI, SetWindowLongA,
+	_In_ HWND hWnd,
+	_In_ int nIndex,
+	_In_ LONG dwNewLong
+);
+
+extern HOOKDEF(LONG_PTR, WINAPI, SetWindowLongPtrA,
+	_In_ HWND hWnd,
+	_In_ int nIndex,
+	_In_ LONG_PTR dwNewLong
+);
+
+extern HOOKDEF(LONG, WINAPI, SetWindowLongW,
+	_In_ HWND hWnd,
+	_In_ int nIndex,
+	_In_ LONG dwNewLong
+);
+
+extern HOOKDEF(LONG_PTR, WINAPI, SetWindowLongPtrW,
+	_In_ HWND hWnd,
+	_In_ int nIndex,
+	_In_ LONG_PTR dwNewLong
+);
 
 
 //
@@ -849,21 +873,6 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtOpenSection,
     __in   POBJECT_ATTRIBUTES ObjectAttributes
 );
 
-extern HOOKDEF(BOOL, WINAPI, CreateProcessInternalW,
-    __in_opt    LPVOID lpUnknown1,
-    __in_opt    LPWSTR lpApplicationName,
-    __inout_opt LPWSTR lpCommandLine,
-    __in_opt    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-    __in_opt    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-    __in        BOOL bInheritHandles,
-    __in        DWORD dwCreationFlags,
-    __in_opt    LPVOID lpEnvironment,
-    __in_opt    LPWSTR lpCurrentDirectory,
-    __in        LPSTARTUPINFO lpStartupInfo,
-    __out       LPPROCESS_INFORMATION lpProcessInformation,
-    __in_opt    LPVOID lpUnknown2
-);
-
 extern HOOKDEF2(BOOL, WINAPI, CreateProcessInternalW,
     __in_opt    LPVOID lpUnknown1,
     __in_opt    LPWSTR lpApplicationName,
@@ -892,6 +901,12 @@ extern HOOKDEF(NTSTATUS, WINAPI, DbgUiWaitStateChange,
 extern HOOKDEF(BOOLEAN, WINAPI, RtlDispatchException,
 	__in PEXCEPTION_RECORD ExceptionRecord,
 	__in PCONTEXT Context
+);
+
+extern HOOKDEF(NTSTATUS, WINAPI, NtRaiseException,
+	__in PEXCEPTION_RECORD ExceptionRecord,
+	__in PCONTEXT Context,
+	__in BOOLEAN SearchFrames
 );
 
 extern HOOKDEF(BOOL, WINAPI, ShellExecuteExW,
@@ -928,8 +943,8 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtReadVirtualMemory,
     __in        HANDLE ProcessHandle,
     __in        LPCVOID BaseAddress,
     __out       LPVOID Buffer,
-    __in        ULONG NumberOfBytesToRead,
-    __out_opt   PULONG NumberOfBytesReaded
+    __in        SIZE_T NumberOfBytesToRead,
+    __out_opt   PSIZE_T NumberOfBytesRead
 );
 
 extern HOOKDEF(BOOL, WINAPI, ReadProcessMemory,
@@ -937,15 +952,15 @@ extern HOOKDEF(BOOL, WINAPI, ReadProcessMemory,
     _In_    LPCVOID lpBaseAddress,
     _Out_   LPVOID lpBuffer,
     _In_    SIZE_T nSize,
-    _Out_   SIZE_T *lpNumberOfBytesRead
+    _Out_   PSIZE_T lpNumberOfBytesRead
 );
 
 extern HOOKDEF(NTSTATUS, WINAPI, NtWriteVirtualMemory,
     __in        HANDLE ProcessHandle,
     __in        LPVOID BaseAddress,
     __in        LPCVOID Buffer,
-    __in        ULONG NumberOfBytesToWrite,
-    __out_opt   ULONG *NumberOfBytesWritten
+    __in        SIZE_T NumberOfBytesToWrite,
+    __out_opt   PSIZE_T NumberOfBytesWritten
 );
 
 extern HOOKDEF(BOOL, WINAPI, WriteProcessMemory,
@@ -953,13 +968,13 @@ extern HOOKDEF(BOOL, WINAPI, WriteProcessMemory,
     _In_    LPVOID lpBaseAddress,
     _In_    LPCVOID lpBuffer,
     _In_    SIZE_T nSize,
-    _Out_   SIZE_T *lpNumberOfBytesWritten
+    _Out_   PSIZE_T lpNumberOfBytesWritten
 );
 
 extern HOOKDEF(NTSTATUS, WINAPI, NtProtectVirtualMemory,
     IN      HANDLE ProcessHandle,
     IN OUT  PVOID *BaseAddress,
-    IN OUT  PULONG NumberOfBytesToProtect,
+    IN OUT  PSIZE_T NumberOfBytesToProtect,
     IN      ULONG NewAccessProtection,
     OUT     PULONG OldAccessProtection
 );
@@ -1100,6 +1115,10 @@ extern HOOKDEF(NTSTATUS, WINAPI, RtlCreateUserThread,
 // Misc Hooks
 //
 
+extern HOOKDEF(void, WINAPI, GetSystemInfo,
+	__out LPSYSTEM_INFO lpSystemInfo
+);
+
 extern HOOKDEF(NTSTATUS, WINAPI, RtlDecompressBuffer,
 	__in USHORT CompressionFormat,
 	__out PUCHAR UncompressedBuffer,
@@ -1141,13 +1160,6 @@ extern HOOKDEF(LPTOP_LEVEL_EXCEPTION_FILTER, WINAPI, SetUnhandledExceptionFilter
 
 extern HOOKDEF(UINT, WINAPI, SetErrorMode,
 	_In_ UINT uMode
-);
-
-extern HOOKDEF(NTSTATUS, WINAPI, LdrLoadDll,
-    __in_opt    PWCHAR PathToFile,
-    __in_opt    ULONG Flags,
-    __in        PUNICODE_STRING ModuleFileName,
-    __out       PHANDLE ModuleHandle
 );
 
 extern HOOKDEF(NTSTATUS, WINAPI, LdrGetDllHandle,
@@ -1245,6 +1257,60 @@ extern HOOKDEF(BOOL, WINAPI, GetUserNameA,
 extern HOOKDEF(BOOL, WINAPI, GetUserNameW,
     _Out_    PCWSTR lpBuffer,
     _Inout_  LPDWORD lpnSize
+);
+
+extern HOOKDEF(HDEVINFO, WINAPI, SetupDiGetClassDevsA,
+	_In_opt_ const GUID   *ClassGuid,
+	_In_opt_       PCSTR Enumerator,
+	_In_opt_       HWND   hwndParent,
+	_In_           DWORD  Flags
+);
+
+extern HOOKDEF(HDEVINFO, WINAPI, SetupDiGetClassDevsW,
+	_In_opt_ const GUID   *ClassGuid,
+	_In_opt_       PCWSTR Enumerator,
+	_In_opt_       HWND   hwndParent,
+	_In_           DWORD  Flags
+);
+
+extern HOOKDEF(BOOL, WINAPI, SetupDiGetDeviceRegistryPropertyA,
+	_In_      HDEVINFO         DeviceInfoSet,
+	_In_      PSP_DEVINFO_DATA DeviceInfoData,
+	_In_      DWORD            Property,
+	_Out_opt_ PDWORD           PropertyRegDataType,
+	_Out_opt_ PBYTE            PropertyBuffer,
+	_In_      DWORD            PropertyBufferSize,
+	_Out_opt_ PDWORD           RequiredSize
+);
+
+extern HOOKDEF(BOOL, WINAPI, SetupDiGetDeviceRegistryPropertyW,
+	_In_      HDEVINFO         DeviceInfoSet,
+	_In_      PSP_DEVINFO_DATA DeviceInfoData,
+	_In_      DWORD            Property,
+	_Out_opt_ PDWORD           PropertyRegDataType,
+	_Out_opt_ PBYTE            PropertyBuffer,
+	_In_      DWORD            PropertyBufferSize,
+	_Out_opt_ PDWORD           RequiredSize
+);
+
+extern HOOKDEF(HRESULT, WINAPI, DecodeImageEx,
+	__in PVOID pStream, // IStream *
+	__in PVOID pMap, // IMapMIMEToCLSID *
+	__in PVOID pEventSink, // IUnknown *
+	__in_opt LPCWSTR pszMIMETypeParam
+);
+
+extern HOOKDEF(HRESULT, WINAPI, DecodeImage,
+	__in PVOID pStream, // IStream *
+	__in PVOID pMap, // IMapMIMEToCLSID *
+	__in PVOID pEventSink // IUnknown *
+);
+
+extern HOOKDEF(NTSTATUS, WINAPI, LsaOpenPolicy,
+	PLSA_UNICODE_STRING SystemName,
+	PVOID ObjectAttributes,
+	ACCESS_MASK DesiredAccess,
+	PVOID PolicyHandle
 );
 
 //
@@ -1424,22 +1490,22 @@ extern HOOKDEF(BOOL, WINAPI, InternetCrackUrlW,
 
 extern HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestA,
     __in  HINTERNET hConnect,
-    __in  LPCTSTR lpszVerb,
-    __in  LPCTSTR lpszObjectName,
-    __in  LPCTSTR lpszVersion,
-    __in  LPCTSTR lpszReferer,
-    __in  LPCTSTR *lplpszAcceptTypes,
+    __in  LPCSTR lpszVerb,
+    __in  LPCSTR lpszObjectName,
+    __in  LPCSTR lpszVersion,
+    __in  LPCSTR lpszReferer,
+    __in  LPCSTR *lplpszAcceptTypes,
     __in  DWORD dwFlags,
     __in  DWORD_PTR dwContext
 );
 
 extern HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestW,
     __in  HINTERNET hConnect,
-    __in  LPWSTR lpszVerb,
-    __in  LPWSTR lpszObjectName,
-    __in  LPWSTR lpszVersion,
-    __in  LPWSTR lpszReferer,
-    __in  LPWSTR *lplpszAcceptTypes,
+    __in  LPCWSTR lpszVerb,
+    __in  LPCWSTR lpszObjectName,
+    __in  LPCWSTR lpszVersion,
+    __in  LPCWSTR lpszReferer,
+    __in  LPCWSTR *lplpszAcceptTypes,
     __in  DWORD dwFlags,
     __in  DWORD_PTR dwContext
 );
@@ -1524,6 +1590,54 @@ extern HOOKDEF(int, WSAAPI, GetAddrInfoW,
     _In_opt_  PCWSTR pServiceName,
     _In_opt_  const ADDRINFOW *pHints,
     _Out_     PADDRINFOW *ppResult
+);
+
+extern HOOKDEF(DWORD, WINAPI, WNetUseConnectionW,
+	_In_     HWND hwndOwner,
+	_In_     LPNETRESOURCEW lpNetResource,
+	_In_     LPCWSTR lpPassword,
+	_In_     LPCWSTR lpUserID,
+	_In_     DWORD dwFlags,
+	_Out_    LPWSTR lpAccessName,
+	_Inout_  LPDWORD lpBufferSize,
+	_Out_    LPDWORD lpResult
+);
+
+extern HOOKDEF(BOOL, WINAPI, CryptRetrieveObjectByUrlW,
+	_In_     LPCWSTR                  pszUrl,
+	_In_     LPCSTR                   pszObjectOid,
+	_In_     DWORD                    dwRetrievalFlags,
+	_In_     DWORD                    dwTimeout,
+	_Out_    LPVOID                   *ppvObject,
+	_In_     HCRYPTASYNC              hAsyncRetrieve,
+	_In_opt_ PCRYPT_CREDENTIALS       pCredentials,
+	_In_opt_ LPVOID                   pvVerify,
+	_In_     PCRYPT_RETRIEVE_AUX_INFO pAuxInfo
+);
+
+extern HOOKDEF(ULONG, WINAPI, GetAdaptersAddresses,
+	_In_    ULONG                 Family,
+	_In_    ULONG                 Flags,
+	_In_    PVOID                 Reserved,
+	_Inout_ PVOID				  AdapterAddresses, // PIP_ADAPTER_ADDRESSES
+	_Inout_ PULONG                SizePointer
+);
+
+extern HOOKDEF(ULONG, WINAPI, NetGetJoinInformation,
+	_In_  LPCWSTR               lpServer,
+	_Out_ LPWSTR                *lpNameBuffer,
+	_Out_ DWORD *				BufferType
+);
+
+extern HOOKDEF(ULONG, WINAPI, NetUserGetLocalGroups,
+	_In_  LPCWSTR servername,
+	_In_  LPCWSTR username,
+	_In_  DWORD   level,
+	_In_  DWORD   flags,
+	_Out_ LPBYTE  *bufptr,
+	_In_  DWORD   prefmaxlen,
+	_Out_ LPDWORD entriesread,
+	_Out_ LPDWORD totalentries
 );
 
 //
@@ -1619,6 +1733,12 @@ extern HOOKDEF(BOOL, WINAPI, GetLastInputInfo,
 extern HOOKDEF(NTSTATUS, WINAPI, NtDelayExecution,
     __in    BOOLEAN Alertable,
     __in    PLARGE_INTEGER DelayInterval
+);
+
+extern HOOKDEF(NTSTATUS, WINAPI, NtWaitForSingleObject,
+	__in HANDLE Handle,
+	__in    BOOLEAN Alertable,
+	__in_opt    PLARGE_INTEGER Timeout
 );
 
 extern HOOKDEF(void, WINAPI, GetLocalTime,
@@ -1995,15 +2115,27 @@ extern HOOKDEF(BOOL, WINAPI, CryptCreateHash,
 	_Out_  HCRYPTHASH *phHash
 );
 
+extern HOOKDEF(HRESULT, WINAPI, HTTPSCertificateTrust,
+	PVOID data // PCRYPT_PROVIDER_DATA
+);
+
+extern HOOKDEF(HRESULT, WINAPI, HTTPSFinalProv,
+	PVOID data // PCRYPT_PROVIDER_DATA
+);
+
 //
 // Special Hooks
 //
 
 extern HOOKDEF2(NTSTATUS, WINAPI, LdrLoadDll,
     __in_opt    PWCHAR PathToFile,
-    __in_opt    ULONG Flags,
+    __in_opt    PULONG Flags,
     __in        PUNICODE_STRING ModuleFileName,
     __out       PHANDLE ModuleHandle
+);
+
+extern HOOKDEF2(NTSTATUS, WINAPI, LdrUnloadDll,
+	PVOID DllImageBase
 );
 
 extern HOOKDEF(NTSTATUS, WINAPI, NtMapViewOfSection,
@@ -2017,4 +2149,34 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtMapViewOfSection,
     __in     UINT InheritDisposition,
     __in     ULONG AllocationType,
     __in     ULONG Win32Protect
+);
+
+extern HOOKDEF2(int, WINAPI, JsEval,
+	PVOID Arg1,
+	PVOID Arg2,
+	PVOID Arg3,
+	int Index,
+	DWORD *scriptobj
+);
+
+extern HOOKDEF2(int, WINAPI, COleScript_Compile,
+	PVOID Arg1,
+	PWCHAR ScriptBuf,
+	int Arg3,
+	int Arg4,
+	int Arg5,
+	PWCHAR LocationBuf,
+	PVOID Arg7
+);
+
+extern HOOKDEF2(int, WINAPI, CDocument_write,
+	PVOID this,
+	SAFEARRAY *psa
+);
+
+extern HOOKDEF(NTSTATUS, WINAPI, NtQuerySystemInformation,
+	_In_ ULONG SystemInformationClass,
+	_Inout_ PVOID SystemInformation,
+	_In_ ULONG SystemInformationLength,
+	_Out_opt_ PULONG ReturnLength
 );

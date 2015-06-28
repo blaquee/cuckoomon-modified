@@ -299,38 +299,62 @@ HOOKDEF(HINTERNET, WINAPI, InternetOpenUrlW,
     return ret;
 }
 
+static did_initial_request;
+
 HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestA,
     __in  HINTERNET hConnect,
-    __in  LPCTSTR lpszVerb,
-    __in  LPCTSTR lpszObjectName,
-    __in  LPCTSTR lpszVersion,
-    __in  LPCTSTR lpszReferer,
-    __in  LPCTSTR *lplpszAcceptTypes,
+    __in  LPCSTR lpszVerb,
+    __in  LPCSTR lpszObjectName,
+    __in  LPCSTR lpszVersion,
+    __in  LPCSTR lpszReferer,
+    __in  LPCSTR *lplpszAcceptTypes,
     __in  DWORD dwFlags,
     __in  DWORD_PTR dwContext
 ) {
-    HINTERNET ret = Old_HttpOpenRequestA(hConnect, lpszVerb, lpszObjectName,
-        lpszVersion, lpszReferer, lplpszAcceptTypes, dwFlags, dwContext);
+	HINTERNET ret;
+	LPCSTR referer;
+
+	if (lpszReferer == NULL && g_config.url_of_interest && g_config.referrer && strlen(g_config.referrer) && !did_initial_request)
+		referer = g_config.referrer;
+	else
+		referer = lpszReferer;
+
+	ret = Old_HttpOpenRequestA(hConnect, lpszVerb, lpszObjectName,
+        lpszVersion, referer, lplpszAcceptTypes, dwFlags, dwContext);
     LOQ_nonnull("network", "psh", "InternetHandle", hConnect, "Path", lpszObjectName,
         "Flags", dwFlags);
+
+	did_initial_request = TRUE;
+
     return ret;
 }
 
 HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestW,
     __in  HINTERNET hConnect,
-    __in  LPWSTR lpszVerb,
-    __in  LPWSTR lpszObjectName,
-    __in  LPWSTR lpszVersion,
-    __in  LPWSTR lpszReferer,
-    __in  LPWSTR *lplpszAcceptTypes,
+    __in  LPCWSTR lpszVerb,
+    __in  LPCWSTR lpszObjectName,
+    __in  LPCWSTR lpszVersion,
+    __in  LPCWSTR lpszReferer,
+    __in  LPCWSTR *lplpszAcceptTypes,
     __in  DWORD dwFlags,
     __in  DWORD_PTR dwContext
 ) {
-    HINTERNET ret = Old_HttpOpenRequestW(hConnect, lpszVerb, lpszObjectName,
-        lpszVersion, lpszReferer, lplpszAcceptTypes, dwFlags, dwContext);
+	HINTERNET ret;
+	LPCWSTR referer;
+
+	if (lpszReferer == NULL && g_config.url_of_interest && g_config.w_referrer && wcslen(g_config.w_referrer) && !did_initial_request)
+		referer = g_config.w_referrer;
+	else
+		referer = lpszReferer; 
+	
+	ret = Old_HttpOpenRequestW(hConnect, lpszVerb, lpszObjectName,
+        lpszVersion, referer, lplpszAcceptTypes, dwFlags, dwContext);
     LOQ_nonnull("network", "puh", "InternetHandle", hConnect, "Path", lpszObjectName,
         "Flags", dwFlags);
-    return ret;
+
+	did_initial_request = TRUE;
+
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, HttpSendRequestA,
@@ -427,8 +451,15 @@ HOOKDEF(BOOL, WINAPI, InternetSetOptionA,
 	_In_ DWORD dwBufferLength
 ) {
 	BOOL ret = Old_InternetSetOptionA(hInternet, dwOption, lpBuffer, dwBufferLength);
-	// when logging the buffer, remember the special handling of dwBufferLength when lpBuffer holds a string vs other content
-	LOQ_bool("network", "ph", "InternetHandle", hInternet, "Option", dwOption);
+	if (lpBuffer && dwBufferLength == 4) {
+		LOQ_bool("network", "phh", "InternetHandle", hInternet, "Option", dwOption, "Buffer", *(DWORD *)lpBuffer);
+	}
+	else if (lpBuffer) {
+		LOQ_bool("network", "phb", "InternetHandle", hInternet, "Option", dwOption, "Buffer", dwBufferLength, lpBuffer);
+	}
+	else {
+		LOQ_bool("network", "ph", "InternetHandle", hInternet, "Option", dwOption);
+	}
 	return ret;
 }
 
@@ -498,4 +529,76 @@ HOOKDEF(int, WINAPI, GetAddrInfoW,
     int ret = Old_GetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
     LOQ_zero("network", "uu", "NodeName", pNodeName, "ServiceName", pServiceName);
     return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, WNetUseConnectionW,
+	_In_     HWND hwndOwner,
+	_In_     LPNETRESOURCEW lpNetResource,
+	_In_     LPCWSTR lpPassword,
+	_In_     LPCWSTR lpUserID,
+	_In_     DWORD dwFlags,
+	_Out_    LPWSTR lpAccessName,
+	_Inout_  LPDWORD lpBufferSize,
+	_Out_    LPDWORD lpResult
+) {
+	DWORD ret = Old_WNetUseConnectionW(hwndOwner, lpNetResource, lpPassword, lpUserID, dwFlags, lpAccessName, lpBufferSize, lpResult);
+	LOQ_zero("network", "uuuuuh", "LocalName", lpNetResource->lpRemoteName, "RemoteName", lpNetResource->lpRemoteName, "Password", lpPassword, "UserID", lpUserID, "AccessName", lpAccessName, "Flags", dwFlags);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptRetrieveObjectByUrlW,
+	_In_     LPCWSTR                  pszUrl,
+	_In_     LPCSTR                   pszObjectOid,
+	_In_     DWORD                    dwRetrievalFlags,
+	_In_     DWORD                    dwTimeout,
+	_Out_    LPVOID                   *ppvObject,
+	_In_     HCRYPTASYNC              hAsyncRetrieve,
+	_In_opt_ PCRYPT_CREDENTIALS       pCredentials,
+	_In_opt_ LPVOID                   pvVerify,
+	_In_     PCRYPT_RETRIEVE_AUX_INFO pAuxInfo
+) {
+	BOOL ret = Old_CryptRetrieveObjectByUrlW(pszUrl, pszObjectOid, dwRetrievalFlags, dwTimeout, ppvObject, hAsyncRetrieve, pCredentials, pvVerify, pAuxInfo);
+	LOQ_bool("network", "u", "URL", pszUrl);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, GetAdaptersAddresses,
+	_In_    ULONG                 Family,
+	_In_    ULONG                 Flags,
+	_In_    PVOID                 Reserved,
+	_Inout_ PVOID				  AdapterAddresses, // PIP_ADAPTER_ADDRESSES
+	_Inout_ PULONG                SizePointer
+) {
+	ULONG ret = Old_GetAdaptersAddresses(Family, Flags, Reserved, AdapterAddresses, SizePointer);
+	LOQ_zero("network", "");
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetGetJoinInformation,
+	_In_  LPCWSTR               lpServer,
+	_Out_ LPWSTR                *lpNameBuffer,
+	_Out_ DWORD *				BufferType
+) {
+	ULONG ret = Old_NetGetJoinInformation(lpServer, lpNameBuffer, BufferType);
+
+	LOQ_zero("network", "uuI", "Server", lpServer, "NetBIOSName", *lpNameBuffer, "JoinStatus", BufferType);
+
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetUserGetLocalGroups,
+	_In_  LPCWSTR servername,
+	_In_  LPCWSTR username,
+	_In_  DWORD   level,
+	_In_  DWORD   flags,
+	_Out_ LPBYTE  *bufptr,
+	_In_  DWORD   prefmaxlen,
+	_Out_ LPDWORD entriesread,
+	_Out_ LPDWORD totalentries
+) {
+	ULONG ret = Old_NetUserGetLocalGroups(servername, username, level, flags, bufptr, prefmaxlen, entriesread, totalentries);
+
+	LOQ_zero("network", "uui", "ServerName", servername, "UserName", username, "Level", level);
+
+	return ret;
 }

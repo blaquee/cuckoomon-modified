@@ -18,8 +18,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 void unhook_detect_add_region(const char *funcname, const uint8_t *addr,
     const uint8_t *orig, const uint8_t *our, uint32_t length);
+int address_already_hooked(uint8_t *addr);
 
 int unhook_init_detection();
 int terminate_event_init();
 int init_watchdog();
 void restore_hooks_on_range(ULONG_PTR start, ULONG_PTR end);
+
+extern DWORD g_unhook_detect_thread_id;
+extern DWORD g_unhook_watcher_thread_id;
+extern DWORD g_watchdog_thread_id;
+extern DWORD g_terminate_event_thread_id;

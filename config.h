@@ -18,7 +18,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 struct _g_config {
     // name of the pipe to communicate with cuckoo
-    char pipe_name[MAX_PATH];
+    wchar_t pipe_name[MAX_PATH];
+
+	char logserver[MAX_PATH];
 
     // results directory, has to be hidden
     char results[MAX_PATH];
@@ -38,6 +40,10 @@ struct _g_config {
 	// URL of interest
 	wchar_t *url_of_interest;
 
+	// Referrer for initial URL request
+	wchar_t *w_referrer;
+	char *referrer;
+
 	// if this mutex exists then we're shutting down
     char shutdown_mutex[MAX_PATH];
 
@@ -52,6 +58,9 @@ struct _g_config {
 	// do we want to ignore "file of interest" and other forms of log reduction?
 	int full_logs;
 
+	// should we attempt anti-anti-sandbox/VM tricks ?
+	int no_stealth;
+
     // how many milliseconds since startup
     unsigned int startup_time;
 
@@ -59,8 +68,8 @@ struct _g_config {
     int force_sleepskip;
 
     // server ip and port
-    unsigned int host_ip;
-    unsigned short host_port;
+    //unsigned int host_ip;
+    //unsigned short host_port;
 
 	BOOLEAN suspend_logging;
 };

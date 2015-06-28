@@ -60,7 +60,13 @@ static hook_t g_hooks[] = {
     //
 
 	HOOK2(ntdll, LdrLoadDll, TRUE),
+	HOOK2(ntdll, LdrUnloadDll, TRUE),
     HOOK2(kernel32, CreateProcessInternalW, TRUE),
+	// has special handling
+	HOOK2(jscript, COleScript_Compile, TRUE),
+	HOOK2(vbscript, COleScript_Compile, TRUE),
+	//HOOK2(jscript, JsEval, TRUE),
+	HOOK2(mshtml, CDocument_write, TRUE),
 
 	// COM object creation hook
 	HOOK2(ole32, CoCreateInstance, TRUE),
@@ -95,7 +101,7 @@ static hook_t g_hooks[] = {
     HOOK(kernel32, FindFirstFileExA),
     HOOK(kernel32, FindFirstFileExW),
 
-    // Covered by NtCreateFile() but still grap this information
+    // Covered by NtCreateFile() but still grab this information
     HOOK(kernel32, CopyFileA),
     HOOK(kernel32, CopyFileW),
     HOOK(kernel32, CopyFileExW),
@@ -196,6 +202,10 @@ static hook_t g_hooks[] = {
     HOOK(user32, EnumWindows),
 	HOOK(user32, SendNotifyMessageA),
 	HOOK(user32, SendNotifyMessageW),
+	HOOK(user32, SetWindowLongA),
+	HOOK(user32, SetWindowLongW),
+	HOOK(user32, SetWindowLongPtrA),
+	HOOK(user32, SetWindowLongPtrW),
 
     //
     // Sync Hooks
@@ -229,6 +239,7 @@ static hook_t g_hooks[] = {
 	HOOK(kernel32, WaitForDebugEvent),
 	HOOK(ntdll, DbgUiWaitStateChange),
 	HOOK(ntdll, RtlDispatchException),
+	HOOK(ntdll, NtRaiseException),
 
     // all variants of ShellExecute end up in ShellExecuteExW
     HOOK(shell32, ShellExecuteExW),
@@ -290,12 +301,22 @@ static hook_t g_hooks[] = {
 	HOOK(user32, GetAsyncKeyState),
 	HOOK(ntdll, NtLoadDriver),
 	HOOK(ntdll, RtlDecompressBuffer),
-	
+	HOOK(kernel32, GetSystemInfo),
+	HOOK(ntdll, NtQuerySystemInformation),
+	HOOK(setupapi, SetupDiGetClassDevsA),
+	HOOK(setupapi, SetupDiGetClassDevsW),
+	HOOK(setupapi, SetupDiGetDeviceRegistryPropertyA),
+	HOOK(setupapi, SetupDiGetDeviceRegistryPropertyW),
+	HOOK(imgutil, DecodeImageEx),
+	HOOK(imgutil, DecodeImage),
+	HOOK(advapi32, LsaOpenPolicy),
 	//
     // Network Hooks
     //
 	HOOK(netapi32, NetUserGetInfo),
-    HOOK(urlmon, URLDownloadToFileW),
+	HOOK(netapi32, NetGetJoinInformation),
+	HOOK(netapi32, NetUserGetLocalGroups),
+	HOOK(urlmon, URLDownloadToFileW),
 	HOOK(urlmon, ObtainUserAgentString),
 	HOOK(wininet, InternetGetConnectedState),
     HOOK(wininet, InternetOpenA),
@@ -332,6 +353,10 @@ static hook_t g_hooks[] = {
     HOOK(ws2_32, getaddrinfo),
     HOOK(ws2_32, GetAddrInfoW),
 
+	HOOK(mpr, WNetUseConnectionW),
+	HOOK(cryptnet, CryptRetrieveObjectByUrlW),
+	HOOK(iphlpapi, GetAdaptersAddresses),
+
     //
     // Service Hooks
     //
@@ -351,6 +376,7 @@ static hook_t g_hooks[] = {
     // Sleep Hooks
     //
     HOOK(ntdll, NtDelayExecution),
+	HOOK(ntdll, NtWaitForSingleObject),
     HOOK(kernel32, GetLocalTime),
     HOOK(kernel32, GetSystemTime),
 	HOOK(kernel32, GetSystemTimeAsFileTime),
@@ -414,6 +440,28 @@ static hook_t g_hooks[] = {
 	HOOK(advapi32, CryptExportKey),
 	HOOK(advapi32, CryptGenKey),
 	HOOK(advapi32, CryptCreateHash),
+
+	HOOK(wintrust, HTTPSCertificateTrust),
+	HOOK(wintrust, HTTPSFinalProv),
+	
+	// needed due to the DLL being delay-loaded in some cases
+	HOOK(cryptsp, CryptAcquireContextA),
+	HOOK(cryptsp, CryptAcquireContextW),
+	HOOK(cryptsp, CryptProtectData),
+	HOOK(cryptsp, CryptUnprotectData),
+	HOOK(cryptsp, CryptProtectMemory),
+	HOOK(cryptsp, CryptUnprotectMemory),
+	HOOK(cryptsp, CryptDecrypt),
+	HOOK(cryptsp, CryptEncrypt),
+	HOOK(cryptsp, CryptHashData),
+	HOOK(cryptsp, CryptDecodeMessage),
+	HOOK(cryptsp, CryptDecryptMessage),
+	HOOK(cryptsp, CryptEncryptMessage),
+	HOOK(cryptsp, CryptHashMessage),
+	HOOK(cryptsp, CryptExportKey),
+	HOOK(cryptsp, CryptGenKey),
+	HOOK(cryptsp, CryptCreateHash),
+
 };
 
 // get a random hooking method, except for hook_jmp_direct
@@ -436,9 +484,19 @@ void set_hooks_dll(const wchar_t *library)
     }
 }
 
+void revalidate_all_hooks(void)
+{
+	int i;
+	for (i = 0; i < ARRAYSIZE(g_hooks); i++) {
+		if (g_hooks[i].addr && !is_valid_address_range((ULONG_PTR)g_hooks[i].addr, 1)) {
+			g_hooks[i].is_hooked = 0;
+			g_hooks[i].addr = NULL;
+		}
+	}
+}
+
 void set_hooks()
 {
-
 	// before modifying any DLLs, let's first freeze all other threads in our process
 	// otherwise our racy modifications can cause the task to crash prematurely
 	// This code itself is racy as additional threads could be created while we're
@@ -494,17 +552,30 @@ void set_hooks()
 LONG WINAPI cuckoomon_exception_handler(
 	__in struct _EXCEPTION_POINTERS *ExceptionInfo
 	) {
-	char msg[1024];
+	char msg[8192];
 	char *dllname;
 	unsigned int offset;
-	ULONG_PTR eip = (ULONG_PTR)ExceptionInfo->ExceptionRecord->ExceptionAddress;
-	PUCHAR eipptr = (PUCHAR)eip;
+	ULONG_PTR eip;
+	PUCHAR eipptr;
 #ifdef _WIN64
-	ULONG_PTR *stack = (DWORD *)(ULONG_PTR)(ExceptionInfo->ContextRecord->Rsp);
+	ULONG_PTR *stack;
 #else
-	DWORD *stack = (DWORD *)(ULONG_PTR)(ExceptionInfo->ContextRecord->Esp);
+	DWORD *stack;
 #endif
 	lasterror_t lasterror;
+
+	if (ExceptionInfo->ExceptionRecord == NULL || ExceptionInfo->ContextRecord == NULL)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	eip = (ULONG_PTR)ExceptionInfo->ExceptionRecord->ExceptionAddress;
+	eipptr = (PUCHAR)eip;
+
+#ifdef _WIN64
+	stack = (ULONG_PTR *)(ULONG_PTR)(ExceptionInfo->ContextRecord->Rsp);
+#else
+	stack = (DWORD *)(ULONG_PTR)(ExceptionInfo->ContextRecord->Esp);
+#endif
+
 
 #if REPORT_ALL_EXCEPTIONS == 0
 	if (ExceptionInfo->ExceptionRecord->ExceptionCode < 0xc0000000)
@@ -524,10 +595,21 @@ LONG WINAPI cuckoomon_exception_handler(
 		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " %s+%x", dllname, offset);
 	snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " %.08x, Fault Address: %.08x, Esp: %.08x, Exception Code: %08x, ",
 		eip, ExceptionInfo->ExceptionRecord->ExceptionInformation[1], (ULONG_PTR)stack, ExceptionInfo->ExceptionRecord->ExceptionCode);
-	if (is_valid_address_range((ULONG_PTR)stack, 10 * sizeof(ULONG_PTR))) 
+	if (is_valid_address_range((ULONG_PTR)stack, 100 * sizeof(ULONG_PTR))) 
 	{
-		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), "Stack Dump: %.08x %.08x %.08x %.08x %.08x %.08x %.08x %.08x %.08x %.08x, ",
-			stack[0], stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7], stack[8], stack[9]);
+		DWORD i;
+		// overflows ahoy
+		for (i = 0; i < 100; i++) {
+			char *buf = convert_address_to_dll_name_and_offset(stack[i], &offset);
+			if (buf) {
+				snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " %s+%x", buf, offset);
+				free(buf);
+			}
+		}
+		strcat(msg, ", ");
+	}
+	else {
+		strcat(msg, "invalid stack, ");
 	}
 	if (is_valid_address_range(eip, 16)) {
 		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), "Bytes at EIP: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -632,7 +714,9 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 #error Update hook check
 #endif
 		if (((PUCHAR)ReadProcessMemory)[0] == 0xff && ((PUCHAR)ReadProcessMemory)[1] == 0x25) {
-			notify_successful_load();
+			char config_fname[MAX_PATH];
+			sprintf(config_fname, "C:\\%u.ini", GetCurrentProcessId());
+			DeleteFile(config_fname);
 			goto out;
 		}
 #else
@@ -640,7 +724,9 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 #error Update hook check
 #endif
 		if (((PUCHAR)ReadProcessMemory)[0] == 0x8b && ((PUCHAR)ReadProcessMemory)[1] == 0xff && ((PUCHAR)ReadProcessMemory)[2] == 0xff && ((PUCHAR)ReadProcessMemory)[3] == 0x25) {
-			notify_successful_load();
+			char config_fname[MAX_PATH];
+			sprintf(config_fname, "C:\\%u.ini", GetCurrentProcessId());
+			DeleteFile(config_fname);
 			goto out;
 		}
 #endif
@@ -663,9 +749,6 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		if (g_tls_hook_index == TLS_OUT_OF_INDEXES)
 			goto out;
 
-		// there's a small list of processes which we don't want to inject
-		if (is_ignored_process())
-			goto out;
 #if REPORT_EXCEPTIONS
 		AddVectoredExceptionHandler(1, cuckoomon_exception_handler);
 		SetUnhandledExceptionFilter(cuckoomon_exception_handler);
@@ -677,7 +760,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 
 #if !CUCKOODBG
 		// hide our module from peb
-        hide_module_from_peb(hModule);
+        //hide_module_from_peb(hModule);
 #endif
 
         // read the config settings
@@ -697,7 +780,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		hkcu_init();
 
         // initialize the log file
-        log_init(g_config.host_ip, g_config.host_port, CUCKOODBG);
+        log_init(CUCKOODBG);
 
         // initialize the Sleep() skipping stuff
         init_sleep_skip(g_config.first_process);
@@ -722,10 +805,22 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		// initialize context watchdog
 		//init_watchdog();
 
+#ifndef _WIN64
+		if (!g_config.no_stealth) {
+			/* for people too lazy to setup VMs properly */
+			PEB *peb = get_peb();
+			if (peb->NumberOfProcessors == 1)
+				peb->NumberOfProcessors = 2;
+		}
+#endif
+
 		notify_successful_load();
     }
     else if(dwReason == DLL_PROCESS_DETACH) {
-        log_free();
+		// in production, we shouldn't ever get called in this way since we
+		// unlink ourselves from the module list in the PEB
+		// so don't call log_free(), as it'll have side-effects
+        // log_free();
     }
 
 	g_dll_main_complete = TRUE;
