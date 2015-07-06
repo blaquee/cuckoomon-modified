@@ -205,6 +205,11 @@ extern HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
     __in        DWORD dwAdditionalFlags
 );
 
+extern HOOKDEF(BOOL, WINAPI, FindNextFileW,
+	__in HANDLE hFindFile,
+	__out LPWIN32_FIND_DATAW lpFindFileData
+);
+
 extern HOOKDEF(BOOL, WINAPI, CopyFileA,
     __in  LPCTSTR lpExistingFileName,
     __in  LPCTSTR lpNewFileName,
@@ -288,6 +293,12 @@ extern HOOKDEF(BOOL, WINAPI, GetFileVersionInfoW,
 extern HOOKDEF(DWORD, WINAPI, GetFileVersionInfoSizeW,
 	_In_       LPCWSTR lptstrFilename,
 	_Out_opt_  LPDWORD lpdwHandle
+);
+
+extern HOOKDEF(HANDLE, WINAPI, FindFirstChangeNotificationW,
+	_In_	LPCWSTR lpPathName,
+	_In_	BOOL bWatchSubtree,
+	_In_	DWORD dwNotifyFilter
 );
 
 //
@@ -473,6 +484,14 @@ extern HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 
 extern HOOKDEF(LONG, WINAPI, RegCloseKey,
     __in    HKEY hKey
+);
+
+extern HOOKDEF(LONG, WINAPI, RegNotifyChangeKeyValue,
+	_In_     HKEY   hKey,
+	_In_     BOOL   bWatchSubtree,
+	_In_     DWORD  dwNotifyFilter,
+	_In_opt_ HANDLE hEvent,
+	_In_     BOOL   fAsynchronous
 );
 
 //
@@ -2159,14 +2178,31 @@ extern HOOKDEF2(int, WINAPI, JsEval,
 	DWORD *scriptobj
 );
 
-extern HOOKDEF2(int, WINAPI, COleScript_Compile,
+extern HOOKDEF2(int, WINAPI, COleScript_ParseScriptText,
 	PVOID Arg1,
 	PWCHAR ScriptBuf,
-	int Arg3,
-	int Arg4,
-	int Arg5,
-	PWCHAR LocationBuf,
-	PVOID Arg7
+	PVOID Arg3,
+	PVOID Arg4,
+	PVOID Arg5,
+	PVOID Arg6,
+	PVOID Arg7,
+	PVOID Arg8,
+	PVOID Arg9,
+	PVOID Arg10
+);
+
+extern HOOKDEF2(PVOID, WINAPI, JsParseScript,
+	const wchar_t *script,
+	PVOID SourceContext,
+	const wchar_t *sourceUrl,
+	PVOID *result
+);
+
+extern HOOKDEF2(PVOID, WINAPI, JsRunScript,
+	const wchar_t *script,
+	PVOID SourceContext,
+	const wchar_t *sourceUrl,
+	PVOID *result
 );
 
 extern HOOKDEF2(int, WINAPI, CDocument_write,

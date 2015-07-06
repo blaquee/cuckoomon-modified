@@ -446,10 +446,22 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryInformationFile,
     __in   ULONG Length,
     __in   FILE_INFORMATION_CLASS FileInformationClass
 ) {
-    NTSTATUS ret = Old_NtQueryInformationFile(FileHandle, IoStatusBlock,
+	wchar_t *fname = calloc(32768, sizeof(wchar_t));
+	wchar_t *absolutepath = calloc(32768, sizeof(wchar_t));
+	NTSTATUS ret;
+
+
+	path_from_handle(FileHandle, fname, 32768);
+	ensure_absolute_unicode_path(absolutepath, fname);
+
+	ret = Old_NtQueryInformationFile(FileHandle, IoStatusBlock,
         FileInformation, Length, FileInformationClass);
-	LOQ_ntstatus("filesystem", "pib", "FileHandle", FileHandle, "FileInformationClass", FileInformationClass,
+	LOQ_ntstatus("filesystem", "puib", "FileHandle", FileHandle, "HandleName", absolutepath, "FileInformationClass", FileInformationClass,
         "FileInformation", IoStatusBlock->Information, FileInformation);
+
+	free(fname);
+	free(absolutepath);
+
     return ret;
 }
 
@@ -458,6 +470,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryAttributesFile,
 	__out  PFILE_BASIC_INFORMATION FileInformation
 ) {
 	NTSTATUS ret = Old_NtQueryAttributesFile(ObjectAttributes, FileInformation);
+
 	LOQ_ntstatus("filesystem", "O", "FileName", ObjectAttributes);
 	return ret;
 }
@@ -480,7 +493,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtSetInformationFile,
 ) {
 	wchar_t *fname = calloc(32768, sizeof(wchar_t));
 	wchar_t *absolutepath = calloc(32768, sizeof(wchar_t));
-	BOOL ret;
+	NTSTATUS ret;
 
 
 	path_from_handle(FileHandle, fname, 32768);
@@ -618,8 +631,21 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExA,
 ) {
     HANDLE ret = Old_FindFirstFileExA(lpFileName, fInfoLevelId,
         lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+	// XXX: change me if we ever move the analyzer dir out of the root directory
+	if (!g_config.no_stealth && ret != INVALID_HANDLE_VALUE && !stricmp(((PWIN32_FIND_DATAA)lpFindFileData)->cFileName, g_config.analyzer + 3)) {
+		lasterror_t lasterror;
+
+		lasterror.Win32Error = 0x00000002;
+		lasterror.NtstatusError = 0xc000000f;
+		FindClose(ret);
+		set_lasterrors(&lasterror);
+		ret = INVALID_HANDLE_VALUE;
+	}
+
 	LOQ_handle("filesystem", "f", "FileName", lpFileName);
-    return ret;
+
+	return ret;
 }
 
 HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
@@ -632,8 +658,35 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 ) {
     HANDLE ret = Old_FindFirstFileExW(lpFileName, fInfoLevelId,
         lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+	// XXX: change me if we ever move the analyzer dir out of the root directory
+	if (!g_config.no_stealth && ret != INVALID_HANDLE_VALUE && !wcsicmp(((PWIN32_FIND_DATAW)lpFindFileData)->cFileName, g_config.w_analyzer + 3)) {
+		lasterror_t lasterror;
+
+		lasterror.Win32Error = 0x00000002;
+		lasterror.NtstatusError = 0xc000000f;
+		FindClose(ret);
+		set_lasterrors(&lasterror);
+		ret = INVALID_HANDLE_VALUE;
+	}
+
 	LOQ_handle("filesystem", "F", "FileName", lpFileName);
     return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, FindNextFileW,
+	__in HANDLE hFindFile,
+	__out LPWIN32_FIND_DATAW lpFindFileData
+) {
+	BOOL ret = Old_FindNextFileW(hFindFile, lpFindFileData);
+
+	if (!g_config.no_stealth && ret && !wcsicmp(lpFindFileData->cFileName, g_config.w_analyzer + 3)) {
+		ret = Old_FindNextFileW(hFindFile, lpFindFileData);
+	}
+
+	// not logging this due to the flood of logs it would cause
+
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, CopyFileA,
@@ -864,6 +917,18 @@ HOOKDEF(DWORD, WINAPI, GetFileVersionInfoSizeW,
 		LOQ_nonzero("filesystem", "F", "PathName", lptstrFilename);
 	else
 		LOQ_nonzero("filesystem", "u", "PathName", lptstrFilename);
+
+	return ret;
+}
+
+HOOKDEF(HANDLE, WINAPI, FindFirstChangeNotificationW,
+	_In_	LPCWSTR lpPathName,
+	_In_	BOOL bWatchSubtree,
+	_In_	DWORD dwNotifyFilter
+) {
+	HANDLE ret = Old_FindFirstChangeNotificationW(lpPathName, bWatchSubtree, dwNotifyFilter);
+
+	LOQ_handle("filesystem", "Fhi", "PathName", lpPathName, "NotifyFilter", dwNotifyFilter, "WatchSubtree", bWatchSubtree);
 
 	return ret;
 }
