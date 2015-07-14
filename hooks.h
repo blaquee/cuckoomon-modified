@@ -1332,6 +1332,12 @@ extern HOOKDEF(NTSTATUS, WINAPI, LsaOpenPolicy,
 	PVOID PolicyHandle
 );
 
+extern HOOKDEF(DWORD, WINAPI, WNetGetProviderNameW,
+	__in DWORD dwNetType,
+	__out LPWSTR lpProviderName,
+	__inout LPDWORD lpBufferSize
+);
+
 //
 // Network Hooks
 //
