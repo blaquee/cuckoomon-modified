@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -24,6 +24,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "log.h"
 #include "pipe.h"
 #include "config.h"
+
+static int did_initial_request;
 
 HOOKDEF(HINTERNET, WINAPI, WinHttpOpen,
 	_In_opt_ LPCWSTR pwszUserAgent,
@@ -87,8 +89,19 @@ HOOKDEF(HINTERNET, WINAPI, WinHttpOpenRequest,
 	_In_  LPCWSTR *ppwszAcceptTypes,
 	_In_  DWORD dwFlags
 ) {
-	HINTERNET ret = Old_WinHttpOpenRequest(hConnect, pwszVerb, pwszObjectName, pwszVersion, pwszReferrer, ppwszAcceptTypes, dwFlags);
-	LOQ_nonnull("network", "puuuuh", "InternetHandle", hConnect, "Verb", pwszVerb, "ObjectName", pwszObjectName, "Version", pwszVersion, "Referrer", pwszReferrer, "Flags", dwFlags);
+	HINTERNET ret;
+	LPCWSTR referer;
+
+	if ((pwszReferrer == NULL || !wcscmp(pwszReferrer, L"")) && g_config.url_of_interest && g_config.w_referrer && wcslen(g_config.w_referrer) && !did_initial_request)
+		referer = g_config.w_referrer;
+	else
+		referer = pwszReferrer;
+
+	ret = Old_WinHttpOpenRequest(hConnect, pwszVerb, pwszObjectName, pwszVersion, referer, ppwszAcceptTypes, dwFlags);
+	LOQ_nonnull("network", "puuuuh", "InternetHandle", hConnect, "Verb", pwszVerb, "ObjectName", pwszObjectName, "Version", pwszVersion, "Referrer", referer, "Flags", dwFlags);
+
+	did_initial_request = TRUE;
+
 	return ret;
 }
 
@@ -239,7 +252,7 @@ HOOKDEF(HINTERNET, WINAPI, InternetConnectA,
     _In_  DWORD dwFlags,
     _In_  DWORD_PTR dwContext
 ) {
-    HINTERNET ret = Old_InternetConnectA(hInternet, lpszServerName,
+	HINTERNET ret = Old_InternetConnectA(hInternet, lpszServerName,
         nServerPort, lpszUsername, lpszPassword, dwService, dwFlags,
         dwContext);
     LOQ_nonnull("network", "psissih", "InternetHandle", hInternet, "ServerName", lpszServerName,
@@ -299,8 +312,6 @@ HOOKDEF(HINTERNET, WINAPI, InternetOpenUrlW,
     return ret;
 }
 
-static did_initial_request;
-
 HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestA,
     __in  HINTERNET hConnect,
     __in  LPCSTR lpszVerb,
@@ -314,15 +325,15 @@ HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestA,
 	HINTERNET ret;
 	LPCSTR referer;
 
-	if (lpszReferer == NULL && g_config.url_of_interest && g_config.referrer && strlen(g_config.referrer) && !did_initial_request)
+	if ((lpszReferer == NULL || !strcmp(lpszReferer, "")) && g_config.url_of_interest && g_config.referrer && strlen(g_config.referrer) && !did_initial_request)
 		referer = g_config.referrer;
 	else
 		referer = lpszReferer;
 
 	ret = Old_HttpOpenRequestA(hConnect, lpszVerb, lpszObjectName,
         lpszVersion, referer, lplpszAcceptTypes, dwFlags, dwContext);
-    LOQ_nonnull("network", "psh", "InternetHandle", hConnect, "Path", lpszObjectName,
-        "Flags", dwFlags);
+    LOQ_nonnull("network", "pshss", "InternetHandle", hConnect, "Path", lpszObjectName,
+        "Flags", dwFlags, "Referrer", referer, "Verb", lpszVerb);
 
 	did_initial_request = TRUE;
 
@@ -342,15 +353,15 @@ HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestW,
 	HINTERNET ret;
 	LPCWSTR referer;
 
-	if (lpszReferer == NULL && g_config.url_of_interest && g_config.w_referrer && wcslen(g_config.w_referrer) && !did_initial_request)
+	if ((lpszReferer == NULL || !wcscmp(lpszReferer, L"")) && g_config.url_of_interest && g_config.w_referrer && wcslen(g_config.w_referrer) && !did_initial_request)
 		referer = g_config.w_referrer;
 	else
 		referer = lpszReferer; 
 	
 	ret = Old_HttpOpenRequestW(hConnect, lpszVerb, lpszObjectName,
         lpszVersion, referer, lplpszAcceptTypes, dwFlags, dwContext);
-    LOQ_nonnull("network", "puh", "InternetHandle", hConnect, "Path", lpszObjectName,
-        "Flags", dwFlags);
+    LOQ_nonnull("network", "puhuu", "InternetHandle", hConnect, "Path", lpszObjectName,
+		"Flags", dwFlags, "Referrer", referer, "Verb", lpszVerb);
 
 	did_initial_request = TRUE;
 
@@ -366,7 +377,11 @@ HOOKDEF(BOOL, WINAPI, HttpSendRequestA,
 ) {
     BOOL ret = Old_HttpSendRequestA(hRequest, lpszHeaders, dwHeadersLength,
         lpOptional, dwOptionalLength);
-    if(dwHeadersLength == (DWORD) -1 && lpszHeaders != NULL) dwHeadersLength = (DWORD)strlen(lpszHeaders);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	if(dwHeadersLength == (DWORD) -1 && lpszHeaders != NULL) dwHeadersLength = (DWORD)strlen(lpszHeaders);
     LOQ_bool("network", "pSb", "RequestHandle", hRequest,
         "Headers", dwHeadersLength, lpszHeaders,
         "PostData", dwOptionalLength, lpOptional);
@@ -382,12 +397,125 @@ HOOKDEF(BOOL, WINAPI, HttpSendRequestW,
 ) {
     BOOL ret = Old_HttpSendRequestW(hRequest, lpszHeaders, dwHeadersLength,
         lpOptional, dwOptionalLength);
-    LOQ_bool("network", "pUb", "RequestHandle", hRequest,
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+	
+	LOQ_bool("network", "pUb", "RequestHandle", hRequest,
         "Headers", dwHeadersLength, lpszHeaders,
         "PostData", dwOptionalLength, lpOptional);
     return ret;
 }
 
+HOOKDEF(BOOL, WINAPI, HttpSendRequestExA,
+	__in  HINTERNET hRequest,
+	__in  LPINTERNET_BUFFERSA lpBuffersIn,
+	__out LPINTERNET_BUFFERSA lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+) {
+	BOOL ret = Old_HttpSendRequestExA(hRequest, lpBuffersIn, lpBuffersOut, dwFlags, dwContext);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	/* TODO: handle entire chain of buffers */
+	if (lpBuffersIn && lpBuffersIn->dwStructSize >= sizeof(INTERNET_BUFFERSA)) {
+		LOQ_bool("network", "pSbh", "RequestHandle", hRequest,
+			"Headers", lpBuffersIn->dwHeadersLength, lpBuffersIn->lpcszHeader,
+			"PostData", lpBuffersIn->dwBufferLength, lpBuffersIn->lpvBuffer,
+			"Flags", dwFlags);
+	}
+	else {
+		LOQ_bool("network", "ph", "RequestHandle", hRequest, "Flags", dwFlags);
+	}
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, HttpSendRequestExW,
+	__in  HINTERNET hRequest,
+	__in  LPINTERNET_BUFFERSW lpBuffersIn,
+	__out LPINTERNET_BUFFERSW lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+) {
+	BOOL ret = Old_HttpSendRequestExW(hRequest, lpBuffersIn, lpBuffersOut, dwFlags, dwContext);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	/* TODO: handle entire chain of buffers */
+	if (lpBuffersIn && lpBuffersIn->dwStructSize >= sizeof(INTERNET_BUFFERSW)) {
+		LOQ_bool("network", "pUbh", "RequestHandle", hRequest,
+			"Headers", lpBuffersIn->dwHeadersLength, lpBuffersIn->lpcszHeader,
+			"PostData", lpBuffersIn->dwBufferLength, lpBuffersIn->lpvBuffer,
+			"Flags", dwFlags);
+	}
+	else {
+		LOQ_bool("network", "ph", "RequestHandle", hRequest, "Flags", dwFlags);
+	}
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, HttpEndRequestA,
+	__in  HINTERNET hRequest,
+	__out LPINTERNET_BUFFERSA lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+) {
+	BOOL ret = Old_HttpEndRequestA(hRequest, lpBuffersOut, dwFlags, dwContext);
+	LOQ_bool("network", "p", "RequestHandle", hRequest);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, HttpEndRequestW,
+	__in  HINTERNET hRequest,
+	__out LPINTERNET_BUFFERSW lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+) {
+	BOOL ret = Old_HttpEndRequestW(hRequest, lpBuffersOut, dwFlags, dwContext);
+	LOQ_bool("network", "p", "RequestHandle", hRequest);
+	return ret;
+}
+
+
+HOOKDEF(BOOL, WINAPI, HttpAddRequestHeadersA,
+	__in HINTERNET hRequest,
+	__in LPCSTR lpszHeaders,
+	__in DWORD dwHeadersLength,
+	__in DWORD dwModifiers
+) {
+	BOOL ret = Old_HttpAddRequestHeadersA(hRequest, lpszHeaders, dwHeadersLength, dwModifiers);
+	if (dwHeadersLength == (DWORD)-1 && lpszHeaders != NULL) dwHeadersLength = (DWORD)strlen(lpszHeaders);
+	LOQ_bool("network", "pSh", "RequestHandle", hRequest,
+		"Headers", dwHeadersLength, lpszHeaders,
+		"Modifiers", dwModifiers);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, HttpAddRequestHeadersW,
+	__in HINTERNET hRequest,
+	__in LPCWSTR lpszHeaders,
+	__in DWORD dwHeadersLength,
+	__in DWORD dwModifiers
+) {
+	BOOL ret = Old_HttpAddRequestHeadersW(hRequest, lpszHeaders, dwHeadersLength, dwModifiers);
+	if (dwHeadersLength == (DWORD)-1 && lpszHeaders != NULL) dwHeadersLength = (DWORD)wcslen(lpszHeaders);
+	LOQ_bool("network", "pUh", "RequestHandle", hRequest,
+		"Headers", dwHeadersLength, lpszHeaders,
+		"Modifiers", dwModifiers);
+	return ret;
+}
+
+HOOKDEF(int, WINAPI, NSPStartup,
+	__in LPGUID lpProviderId,
+	__out PVOID lpnspRoutines
+) {
+	int ret = Old_NSPStartup(lpProviderId, lpnspRoutines);
+	LOQ_zero("network", "");
+	return ret;
+}
 HOOKDEF(BOOL, WINAPI, InternetReadFile,
     _In_   HINTERNET hFile,
     _Out_  LPVOID lpBuffer,
@@ -473,7 +601,11 @@ HOOKDEF(DNS_STATUS, WINAPI, DnsQuery_A,
 ) {
     DNS_STATUS ret = Old_DnsQuery_A(lpstrName, wType, Options, pExtra,
         ppQueryResultsSet, pReserved);
-    LOQ_zero("network", "sih", "Name", lpstrName, "Type", wType, "Options", Options);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	LOQ_zero("network", "sih", "Name", lpstrName, "Type", wType, "Options", Options);
     return ret;
 }
 
@@ -487,7 +619,11 @@ HOOKDEF(DNS_STATUS, WINAPI, DnsQuery_UTF8,
 ) {
     DNS_STATUS ret = Old_DnsQuery_UTF8(lpstrName, wType, Options, pExtra,
         ppQueryResultsSet, pReserved);
-    LOQ_zero("network", "sih", "Name", lpstrName, "Type", wType, "Options", Options);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	LOQ_zero("network", "sih", "Name", lpstrName, "Type", wType, "Options", Options);
     return ret;
 }
 
@@ -501,7 +637,11 @@ HOOKDEF(DNS_STATUS, WINAPI, DnsQuery_W,
 ) {
     DNS_STATUS ret = Old_DnsQuery_W(lpstrName, wType, Options, pExtra,
         ppQueryResultsSet, pReserved);
-    LOQ_zero("network", "uih", "Name", lpstrName, "Type", wType, "Options", Options);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	LOQ_zero("network", "uih", "Name", lpstrName, "Type", wType, "Options", Options);
     return ret;
 }
 
@@ -511,7 +651,7 @@ HOOKDEF(int, WINAPI, getaddrinfo,
     _In_opt_  const ADDRINFOA *pHints,
     _Out_     PADDRINFOA *ppResult
 ) {
-    int ret = Old_getaddrinfo(pNodeName, pServiceName, pHints, ppResult);
+	int ret = Old_getaddrinfo(pNodeName, pServiceName, pHints, ppResult);
 
 	if (g_config.url_of_interest && g_config.suspend_logging)
 		g_config.suspend_logging = FALSE;
@@ -527,7 +667,11 @@ HOOKDEF(int, WINAPI, GetAddrInfoW,
     _Out_     PADDRINFOW *ppResult
 ) {
     int ret = Old_GetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
-    LOQ_zero("network", "uu", "NodeName", pNodeName, "ServiceName", pServiceName);
+
+	if (g_config.url_of_interest && g_config.suspend_logging)
+		g_config.suspend_logging = FALSE;
+
+	LOQ_zero("network", "uu", "NodeName", pNodeName, "ServiceName", pServiceName);
     return ret;
 }
 
@@ -599,6 +743,18 @@ HOOKDEF(ULONG, WINAPI, NetUserGetLocalGroups,
 	ULONG ret = Old_NetUserGetLocalGroups(servername, username, level, flags, bufptr, prefmaxlen, entriesread, totalentries);
 
 	LOQ_zero("network", "uui", "ServerName", servername, "UserName", username, "Level", level);
+
+	return ret;
+}
+
+HOOKDEF(HRESULT, WINAPI, CoInternetSetFeatureEnabled,
+	INTERNETFEATURELIST FeatureEntry,
+	_In_ DWORD			dwFlags,
+	BOOL				fEnable
+) {
+	HRESULT ret = Old_CoInternetSetFeatureEnabled(FeatureEntry, dwFlags, fEnable);
+
+	LOQ_hresult("network", "ihi", "FeatureEntry", FeatureEntry, "Flags", dwFlags, "Enable", fEnable);
 
 	return ret;
 }

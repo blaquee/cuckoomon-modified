@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -81,10 +81,12 @@ HOOKDEF(UINT, WINAPI, SetErrorMode,
 	_In_ UINT uMode
 ) {
 	UINT ret = 0;
-#ifndef REPORT_EXCEPTIONS
+#if REPORT_EXCEPTIONS
+#else
 	ret = Old_SetErrorMode(uMode);
 #endif
-	LOQ_void("system", "h", "Mode", uMode);
+	//LOQ_void("system", "h", "Mode", uMode);
+	disable_tail_call_optimization();
 	return ret;
 }
 
@@ -140,21 +142,61 @@ HOOKDEF(BOOL, WINAPI, DeviceIoControl,
 	return ret;
 }
 
-HOOKDEF(BOOL, WINAPI, ExitWindowsEx,
+HOOKDEF_NOTAIL(WINAPI, ExitWindowsEx,
     __in  UINT uFlags,
     __in  DWORD dwReason
 ) {
-    BOOL ret = 0;
-    LOQ_bool("system", "hi", "Flags", uFlags, "Reason", dwReason);
-	log_flush();
-    return Old_ExitWindowsEx(uFlags, dwReason);
+    DWORD ret = 0;
+    LOQ_zero("system", "hi", "Flags", uFlags, "Reason", dwReason);
+	pipe("SHUTDOWN:");
+	return ret;
+}
+
+HOOKDEF_NOTAIL(WINAPI, InitiateShutdownW,
+	_In_opt_ LPWSTR lpMachineName,
+	_In_opt_ LPWSTR lpMessage,
+	_In_     DWORD  dwGracePeriod,
+	_In_     DWORD  dwShutdownFlags,
+	_In_     DWORD  dwReason
+) {
+	DWORD ret = 0;
+	LOQ_zero("system", "uuihh", "MachineName", lpMachineName, "Message", lpMessage, "GracePeriod", dwGracePeriod, "ShutdownFlags", dwShutdownFlags, "Reason", dwReason);
+	pipe("SHUTDOWN:");
+	return ret;
+}
+
+HOOKDEF_NOTAIL(WINAPI, InitiateSystemShutdownW,
+	_In_opt_ LPWSTR lpMachineName,
+	_In_opt_ LPWSTR lpMessage,
+	_In_     DWORD  dwTimeout,
+	_In_     BOOL	bForceAppsClosed,
+	_In_     BOOL	bRebootAfterShutdown
+) {
+	DWORD ret = 0;
+	LOQ_zero("system", "uuiii", "MachineName", lpMachineName, "Message", lpMessage, "Timeout", dwTimeout, "ForceAppsClosed", bForceAppsClosed, "RebootAfterShutdown", bRebootAfterShutdown);
+	pipe("SHUTDOWN:");
+	return ret;
+}
+
+HOOKDEF_NOTAIL(WINAPI, InitiateSystemShutdownExW,
+	_In_opt_ LPWSTR lpMachineName,
+	_In_opt_ LPWSTR lpMessage,
+	_In_     DWORD  dwTimeout,
+	_In_     BOOL	bForceAppsClosed,
+	_In_     BOOL	bRebootAfterShutdown,
+	_In_	 DWORD	dwReason
+) {
+	DWORD ret = 0;
+	LOQ_zero("system", "uuiiih", "MachineName", lpMachineName, "Message", lpMessage, "Timeout", dwTimeout, "ForceAppsClosed", bForceAppsClosed, "RebootAfterShutdown", bRebootAfterShutdown, "Reason", dwReason);
+	pipe("SHUTDOWN:");
+	return ret;
 }
 
 static int num_isdebuggerpresent;
 
 HOOKDEF(BOOL, WINAPI, IsDebuggerPresent,
 	void
-	) {
+) {
 
 	BOOL ret = Old_IsDebuggerPresent();
 	num_isdebuggerpresent++;
@@ -210,6 +252,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtClose,
 	ret = Old_NtClose(Handle);
     LOQ_ntstatus("system", "p", "Handle", Handle);
     if(NT_SUCCESS(ret)) {
+		remove_file_from_log_tracking(Handle);
         file_close(Handle);
     }
     return ret;
@@ -424,7 +467,7 @@ HOOKDEF(NTSTATUS, WINAPI, RtlDecompressBuffer,
 	NTSTATUS ret = Old_RtlDecompressBuffer(CompressionFormat, UncompressedBuffer, UncompressedBufferSize,
 		CompressedBuffer, CompressedBufferSize, FinalUncompressedSize);
 
-	LOQ_ntstatus("misc", "b", "UncompressedBuffer", ret ? 0 : *FinalUncompressedSize, UncompressedBuffer);
+	LOQ_ntstatus("misc", "pbh", "UncompressedBufferAddress", UncompressedBuffer, "UncompressedBuffer", ret ? 0 : *FinalUncompressedSize, UncompressedBuffer, "UncompressedBufferLength", ret ? 0 : *FinalUncompressedSize);
 
 	return ret;
 }

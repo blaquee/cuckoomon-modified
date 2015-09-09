@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -24,6 +24,48 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "misc.h"
 #include "hook_sleep.h"
 #include "unhook.h"
+#include "lookup.h"
+
+static lookup_t g_ignored_threads;
+
+void ignored_threads_init(void)
+{
+	lookup_init(&g_ignored_threads);
+}
+
+BOOLEAN is_ignored_thread(DWORD tid)
+{
+	void *ret;
+	lasterror_t lasterror;
+
+	get_lasterrors(&lasterror);
+	ret = lookup_get(&g_ignored_threads, (unsigned int)tid, NULL);
+	set_lasterrors(&lasterror);
+
+	if (ret)
+		return TRUE;
+	return FALSE;
+}
+
+void remove_ignored_thread(DWORD tid)
+{
+	lasterror_t lasterror;
+
+	get_lasterrors(&lasterror);
+	lookup_del(&g_ignored_threads, tid);
+	set_lasterrors(&lasterror);
+}
+
+void add_ignored_thread(DWORD tid)
+{
+	lasterror_t lasterror;
+
+	get_lasterrors(&lasterror);
+	pipe("INFO:Adding ignored thread %d", tid);
+	lookup_add(&g_ignored_threads, tid, 0);
+	set_lasterrors(&lasterror);
+}
+
 
 HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThread,
 	__in HANDLE ThreadHandle,
@@ -39,7 +81,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThread,
 	pipe("PROCESS:%d:%d,%d", is_suspended(PID, TID), PID, TID);
 
 	ret = Old_NtQueueApcThread(ThreadHandle, ApcRoutine,
-		ApcRoutineContext, ApcStatusBlock, ApcReserved);
+							   ApcRoutineContext, ApcStatusBlock, ApcReserved);
 
 	LOQ_ntstatus("threading", "iip", "ProcessId", PID, "ThreadId", TID, "ThreadHandle", ThreadHandle);
 
@@ -47,6 +89,31 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThread,
 		disable_sleep_skip();
 	return ret;
 }
+
+HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThreadEx,
+	__in HANDLE ThreadHandle,
+	__in_opt HANDLE UserApcReserveHandle,
+	__in PIO_APC_ROUTINE ApcRoutine,
+	__in_opt PVOID ApcRoutineContext,
+	__in_opt PIO_STATUS_BLOCK ApcStatusBlock,
+	__in_opt PVOID ApcReserved
+) {
+	DWORD PID = pid_from_thread_handle(ThreadHandle);
+	DWORD TID = tid_from_thread_handle(ThreadHandle);
+	NTSTATUS ret;
+
+	pipe("PROCESS:%d:%d,%d", is_suspended(PID, TID), PID, TID);
+
+	ret = Old_NtQueueApcThreadEx(ThreadHandle, UserApcReserveHandle, ApcRoutine,
+								 ApcRoutineContext, ApcStatusBlock, ApcReserved);
+
+	LOQ_ntstatus("threading", "iip", "ProcessId", PID, "ThreadId", TID, "ThreadHandle", ThreadHandle);
+
+	if (NT_SUCCESS(ret))
+		disable_sleep_skip();
+	return ret;
+}
+
 
 HOOKDEF(NTSTATUS, WINAPI, NtCreateThread,
 	__out     PHANDLE ThreadHandle,
@@ -65,6 +132,8 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateThread,
 		InitialTeb, TRUE);
 
 	if (NT_SUCCESS(ret)) {
+		//if (called_by_hook() && pid == GetCurrentProcessId())
+		//	add_ignored_thread((DWORD)ClientId->UniqueThread);
 		pipe("PROCESS:%d:%d,%d", is_suspended(pid, (DWORD)ClientId->UniqueThread), pid, (DWORD)ClientId->UniqueThread);
 		if (CreateSuspended == FALSE) {
 			lasterror_t lasterror;
@@ -104,6 +173,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateThreadEx,
 
 	if (NT_SUCCESS(ret)) {
 		DWORD tid = tid_from_thread_handle(*hThread);
+		//if (called_by_hook() && pid == GetCurrentProcessId())
+		//	add_ignored_thread(tid);
+
 		pipe("PROCESS:%d:%d,%d", is_suspended(pid, tid), pid, tid);
 		if (CreateSuspended == FALSE) {
 			lasterror_t lasterror;
@@ -197,7 +269,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtSuspendThread,
 
 	if (pid == GetCurrentProcessId() && tid && (tid == g_unhook_detect_thread_id || tid == g_unhook_watcher_thread_id ||
 		tid == g_watchdog_thread_id || tid == g_terminate_event_thread_id || tid == g_log_thread_id ||
-		tid == g_logwatcher_thread_id)) {
+		tid == g_logwatcher_thread_id || tid == g_procname_watcher_thread_id)) {
 		ret = 0;
 		*PreviousSuspendCount = 0;
 		LOQ_ntstatus("threading", "pLs", "ThreadHandle", ThreadHandle,
@@ -237,9 +309,11 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateThread,
 	DWORD tid = tid_from_thread_handle(ThreadHandle);
 	NTSTATUS ret = 0;
 
+	//remove_ignored_thread(tid);
+
 	if (pid == GetCurrentProcessId() && tid && (tid == g_unhook_detect_thread_id || tid == g_unhook_watcher_thread_id ||
 		tid == g_watchdog_thread_id || tid == g_terminate_event_thread_id || tid == g_log_thread_id ||
-		tid == g_logwatcher_thread_id)) {
+		tid == g_logwatcher_thread_id || tid == g_procname_watcher_thread_id)) {
 		ret = 0;
 		LOQ_ntstatus("threading", "phs", "ThreadHandle", ThreadHandle, "ExitStatus", ExitStatus, "Alert", "Attempted to kill cuckoomon thread");
 		return ret;

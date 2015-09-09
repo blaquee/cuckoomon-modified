@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -647,7 +647,7 @@ HOOKDEF(NTSTATUS, WINAPI, DbgUiWaitStateChange,
 	return ret;
 }
 
-HOOKDEF(BOOLEAN, WINAPI, RtlDispatchException,
+HOOKDEF_NOTAIL(WINAPI, RtlDispatchException,
 	__in PEXCEPTION_RECORD ExceptionRecord,
 	__in PCONTEXT Context)
 {
@@ -660,7 +660,7 @@ HOOKDEF(BOOLEAN, WINAPI, RtlDispatchException,
 	// flush logs prior to handling of an exception without having to register a vectored exception handler
 	log_flush();
 
-	return Old_RtlDispatchException(ExceptionRecord, Context);
+	return 0;
 }
 
 #if REPORT_EXCEPTIONS
@@ -685,6 +685,6 @@ HOOKDEF(NTSTATUS, WINAPI, NtRaiseException,
 #endif
 
 	ret = Old_NtRaiseException(ExceptionRecord, Context, SearchFrames);
-
+	disable_tail_call_optimization();
 	return ret;
 }

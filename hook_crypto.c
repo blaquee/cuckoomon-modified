@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -94,7 +94,9 @@ HOOKDEF(BOOL, WINAPI, CryptProtectMemory,
 ) {
     BOOL ret = 1;
 	LOQ_bool("crypto", "bi", "Buffer", cbData, pData, "Flags", dwFlags);
-    return Old_CryptProtectMemory(pData, cbData, dwFlags);
+    ret = Old_CryptProtectMemory(pData, cbData, dwFlags);
+	disable_tail_call_optimization();
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, CryptUnprotectMemory,
@@ -134,8 +136,9 @@ HOOKDEF(BOOL, WINAPI, CryptEncrypt,
     BOOL ret = 1;
 	LOQ_bool("crypto", "ppbi", "CryptKey", hKey, "CryptHash", hHash,
         "Buffer", dwBufLen, pbData, "Final", Final);
-    return Old_CryptEncrypt(hKey, hHash, Final, dwFlags, pbData, pdwDataLen,
-        dwBufLen);
+    ret = Old_CryptEncrypt(hKey, hHash, Final, dwFlags, pbData, pdwDataLen, dwBufLen);
+	disable_tail_call_optimization();
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, CryptHashData,
@@ -197,9 +200,11 @@ HOOKDEF(BOOL, WINAPI, CryptEncryptMessage,
 ) {
     BOOL ret = 1;
 	LOQ_bool("crypto", "b", "Buffer", cbToBeEncrypted, pbToBeEncrypted);
-    return Old_CryptEncryptMessage(pEncryptPara, cRecipientCert,
+    ret = Old_CryptEncryptMessage(pEncryptPara, cRecipientCert,
         rgpRecipientCert, pbToBeEncrypted, cbToBeEncrypted, pbEncryptedBlob,
         pcbEncryptedBlob);
+	disable_tail_call_optimization();
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, CryptHashMessage,
@@ -292,5 +297,31 @@ HOOKDEF(HRESULT, WINAPI, HTTPSFinalProv,
 ) {
 	BOOL ret = Old_HTTPSFinalProv(data);
 	LOQ_hresult("crypto", "");
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptDecodeObjectEx,
+	_In_          DWORD              dwCertEncodingType,
+	_In_          LPCSTR             lpszStructType,
+	_In_    const BYTE               *pbEncoded,
+	_In_          DWORD              cbEncoded,
+	_In_          DWORD              dwFlags,
+	_In_          PCRYPT_DECODE_PARA pDecodePara,
+	_Out_         void               *pvStructInfo,
+	_Inout_       DWORD              *pcbStructInfo
+) {
+	BOOL ret = Old_CryptDecodeObjectEx(dwCertEncodingType, lpszStructType, pbEncoded, cbEncoded, dwFlags, pDecodePara, pvStructInfo, pcbStructInfo);
+	LOQ_bool("crypto", "hbh", "CertEncodingType", dwCertEncodingType, "Encoded", cbEncoded, pbEncoded, "Flags", dwFlags);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptImportPublicKeyInfo,
+	_In_  HCRYPTPROV            hCryptProv,
+	_In_  DWORD                 dwCertEncodingType,
+	_In_  PCERT_PUBLIC_KEY_INFO pInfo,
+	_Out_ HCRYPTKEY             *phKey
+) {
+	BOOL ret = Old_CryptImportPublicKeyInfo(hCryptProv, dwCertEncodingType, pInfo, phKey);
+	LOQ_bool("crypto", "hsb", "CertEncodingType", dwCertEncodingType, "AlgOID", pInfo->Algorithm.pszObjId, "Blob", pInfo->PublicKey.cbData, pInfo->PublicKey.pbData);
 	return ret;
 }

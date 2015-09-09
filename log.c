@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -607,7 +607,15 @@ void loq(int index, const char *category, const char *name,
         }
         else if(key == 'I' || key == 'H') {
             int *ptr = va_arg(args, int *);
-            log_int32(ptr != NULL ? *ptr : 0);
+			int theval = 0;
+			__try {
+				if (ptr != NULL)
+					theval = *ptr;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {
+				;
+			}
+            log_int32(theval);
         }
 		else if (key == 'l' || key == 'p') {
 			void *value = va_arg(args, void *);
@@ -615,7 +623,16 @@ void loq(int index, const char *category, const char *name,
 		}
 		else if (key == 'L' || key == 'P') {
 			void **ptr = va_arg(args, void **);
-			log_ptr(ptr != NULL ? *ptr : NULL);
+			void *theptr = NULL;
+
+			__try {
+				if (ptr != NULL)
+					theptr = *ptr;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {
+				;
+			}
+			log_ptr(theptr);
 		}
 		else if (key == 'e') {
 			HKEY reg = va_arg(args, HKEY);
@@ -1040,6 +1057,16 @@ void log_anomaly(const char *subcategory, const char *msg)
 		"Message", msg);
 }
 
+void log_procname_anomaly(PUNICODE_STRING InitialName, PUNICODE_STRING InitialPath, PUNICODE_STRING CurrentName, PUNICODE_STRING CurrentPath)
+{
+	loq(LOG_ID_ANOMALY, "__notification__", "__anomaly__", 1, 0, "isoooo",
+		"ThreadIdentifier", GetCurrentThreadId(),
+		"Subcategory", "procname",
+		"OriginalProcessName", InitialName,
+		"OriginalProcessPath", InitialPath,
+		"ModifiedProcessName", CurrentName,
+		"ModifiedProcessPath", CurrentPath);
+}
 
 void log_hook_modification(const char *funcname, const char *origbytes, const char *newbytes, unsigned int len)
 {

@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2012 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -156,6 +156,6 @@ int read_config(void)
 		g_config.suspend_logging = FALSE;
 
 	fclose(fp);
-    DeleteFile(config_fname);
+    DeleteFileA(config_fname);
 	return 1;
 }

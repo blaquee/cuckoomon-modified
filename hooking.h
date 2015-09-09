@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -53,20 +53,15 @@ typedef struct _UNWIND_INFO {
 	BYTE CountOfCodes;
 	BYTE FrameRegister : 4;
 	BYTE FrameOffset : 4;
-	UNWIND_CODE UnwindCode[10];
+	UNWIND_CODE UnwindCode[20];
 } UNWIND_INFO;
 
-typedef struct _hook_info_t {
-	int disable_count;
-	ULONG_PTR return_address;
-	ULONG_PTR frame_pointer;
-	ULONG_PTR main_caller_retaddr;
-	ULONG_PTR parent_caller_retaddr;
-} hook_info_t;
+#define MAX_PRETRAMP_SIZE 320
+#define MAX_TRAMP_SIZE 128
 
 typedef struct _hook_data_t {
-	unsigned char tramp[128];
-	unsigned char pre_tramp[148];
+	unsigned char tramp[MAX_TRAMP_SIZE];
+	unsigned char pre_tramp[MAX_PRETRAMP_SIZE];
 	//unsigned char our_handler[128];
 	unsigned char hook_data[32];
 
@@ -92,15 +87,32 @@ typedef struct _hook_t {
     // function call
     void **old_func;
 
-    // allow hook recursion on this hook?
+	// pointer to alternate new function used in notail hooks
+	void *alt_func;
+
+	// allow hook recursion on this hook?
     // (see comments @ hook_create_pre_trampoline)
     int allow_hook_recursion;
 
-    // this hook has been performed
-    int is_hooked;
+	unsigned char numargs;
+
+	int notail;
+
+	// this hook has been performed
+	int is_hooked;
 
 	hook_data_t *hookdata;
 } hook_t;
+
+typedef struct _hook_info_t {
+	int disable_count;
+	hook_t *current_hook;
+	ULONG_PTR return_address;
+	ULONG_PTR frame_pointer;
+	ULONG_PTR main_caller_retaddr;
+	ULONG_PTR parent_caller_retaddr;
+} hook_info_t;
+
 
 typedef struct _lasterror_t {
 	DWORD Win32Error;
@@ -120,7 +132,7 @@ int called_by_hook(void);
 int addr_in_our_dll_range(ULONG_PTR addr);
 void get_lasterrors(lasterror_t *errors);
 void set_lasterrors(lasterror_t *errors);
-int WINAPI enter_hook(uint8_t is_special_hook, ULONG_PTR _ebp, ULONG_PTR retaddr);
+int WINAPI enter_hook(hook_t *h, ULONG_PTR _ebp, ULONG_PTR retaddr);
 void emit_rel(unsigned char *buf, unsigned char *source, unsigned char *target);
 int operate_on_backtrace(ULONG_PTR retaddr, ULONG_PTR _ebp, int(*func)(ULONG_PTR));
 
@@ -188,9 +200,13 @@ static __inline ULONG_PTR get_stack_bottom(void)
     return_value (calling_convention *Old_##apiname)(__VA_ARGS__); \
     return_value calling_convention New_##apiname(__VA_ARGS__)
 
-#define HOOKDEF2(return_value, calling_convention, apiname, ...) \
-    return_value (calling_convention *Old2_##apiname)(__VA_ARGS__); \
-    return_value calling_convention New2_##apiname(__VA_ARGS__)
+#define HOOKDEF_NOTAIL(calling_convention, apiname, ...) \
+    DWORD calling_convention New_##apiname(__VA_ARGS__)
+
+#define HOOKDEF_ALT(return_value, calling_convention, apiname, ...) \
+    return_value (calling_convention *Old_##apiname)(__VA_ARGS__); \
+    return_value calling_convention Alt_##apiname(__VA_ARGS__)
+
 
 // each thread has a special 260-wchar counting unicode_string buffer in its
 // thread information block, this is likely to be overwritten in certain

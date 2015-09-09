@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -37,6 +37,7 @@ static _NtDelayExecution pNtDelayExecution;
 static _NtQuerySystemInformation pNtQuerySystemInformation;
 _NtAllocateVirtualMemory pNtAllocateVirtualMemory;
 _NtFreeVirtualMemory pNtFreeVirtualMemory;
+_LdrRegisterDllNotification pLdrRegisterDllNotification;
 
 void resolve_runtime_apis(void)
 {
@@ -51,6 +52,7 @@ void resolve_runtime_apis(void)
 	*(FARPROC *)&pNtQueryAttributesFile = GetProcAddress(ntdllbase, "NtQueryAttributesFile");
 	*(FARPROC *)&pNtAllocateVirtualMemory = GetProcAddress(ntdllbase, "NtAllocateVirtualMemory");
 	*(FARPROC *)&pNtFreeVirtualMemory = GetProcAddress(ntdllbase, "NtFreeVirtualMemory");
+	*(FARPROC *)&pLdrRegisterDllNotification = GetProcAddress(ntdllbase, "LdrRegisterDllNotification");
 	*(FARPROC *)&pRtlGenRandom = GetProcAddress(GetModuleHandle("advapi32"), "SystemFunction036");
 }
 
@@ -275,6 +277,7 @@ void perform_ascii_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength
 		replace_string_in_buf(Data, DataLength, "QEMU", "DELL");
 		replace_string_in_buf(Data, DataLength, "VMware", "DELL__");
 		replace_string_in_buf(Data, DataLength, "Virtual", "C300_BD");
+		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
 	}
 
 	if (!wcsnicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor", 63) &&
@@ -332,6 +335,7 @@ void perform_unicode_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLeng
 		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"QEMU", L"DELL");
 		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VMware", L"DELL__");
 		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"Virtual", L"C300_BD");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VBOX", L"DELL");
 	}
 
 	if (!wcsnicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor", 63) &&
@@ -1486,6 +1490,22 @@ ULONG_PTR get_olescript_compile_addr(HMODULE mod)
 	return (ULONG_PTR)p;
 }
 
+PWCHAR get_dll_basename(PUNICODE_STRING library)
+{
+	PWCHAR dllname, end, start, start2;
+	end = wcsrchr(library->Buffer, L'.');
+	start = wcsrchr(library->Buffer, L'\\');
+	start2 = wcsrchr(library->Buffer, L'/');
+	if (end && !wcsicmp(end, L".dll"))
+		*end = L'\0';
+	if (start2 && start2 > start)
+		dllname = start2 + 1;
+	else if (start && start > start2)
+		dllname = start + 1;
+	else
+		dllname = library->Buffer;
+	return dllname;
+}
 
 ULONG_PTR get_olescript_parsescripttext_addr(HMODULE mod)
 {
@@ -1587,4 +1607,42 @@ next_iter:
 #endif
 
 	return 0;
+}
+
+typedef struct _DLL_NOTIFICATION_STRUCT {
+	struct _DLL_NOTIFICATION_STRUCT *Next;
+	DWORD Unused;
+	PLDR_DLL_NOTIFICATION_FUNCTION RegistrationFptr;
+	PVOID Context;
+} DLL_NOTIFICATION_STRUCT, *PDLL_NOTIFICATION_STRUCT;
+
+
+void register_dll_notification_manually(PLDR_DLL_NOTIFICATION_FUNCTION notify)
+{
+#ifdef _WIN64
+	return;
+#else
+	PUCHAR p, start, end;
+
+	if (!get_section_bounds(GetModuleHandleA("ntdll"), ".text", &start, &end))
+		return;
+	for (p = start; p < end - 30; p++){
+		if (p[0] == 0xb8 && p[5] == 0xa3 && p[10] == 0xa3 && p[15] == 0xb8 && p[20] == 0xa3 && p[25] == 0xa3) {
+			DWORD addr1, addr2;
+			PDLL_NOTIFICATION_STRUCT next, our;
+
+			addr1 = *(DWORD *)&p[1];
+			addr2 = *(DWORD *)&p[16];
+			// throw out RtlpLeakList/RtlpBusyList
+			if (addr1 == addr2 + 8)
+				continue;
+			next = ((PDLL_NOTIFICATION_STRUCT)(addr2))->Next;
+			our = (PDLL_NOTIFICATION_STRUCT)calloc(1, sizeof(DLL_NOTIFICATION_STRUCT));
+			our->Next = next;
+			our->RegistrationFptr = notify;
+			*(PDLL_NOTIFICATION_STRUCT *)(addr2) = our;
+			return;
+		}
+	}
+#endif
 }

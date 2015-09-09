@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -72,6 +72,7 @@ void log_hook_anomaly(const char *subcategory, int success,
 void log_hook_modification(const char *funcname, const char *origbytes, const char *newbytes, unsigned int len);
 void log_hook_removal(const char *funcname);
 void log_hook_restoration(const char *funcname);
+void log_procname_anomaly(PUNICODE_STRING InitialName, PUNICODE_STRING InitialPath, PUNICODE_STRING CurrentName, PUNICODE_STRING CurrentPath);
 
 void log_init(int debug);
 void log_flush();
@@ -113,15 +114,6 @@ DWORD get_last_api(void);
 #define LOQ_nonnegone(cat, fmt, ...) _LOQ(ret != -1, cat, fmt, ##__VA_ARGS__)
 #define LOQ_sockerr(cat, fmt, ...) _LOQ(ret != SOCKET_ERROR, cat, fmt, ##__VA_ARGS__)
 #define LOQ_sock(cat, fmt, ...) _LOQ(ret != INVALID_SOCKET, cat, fmt, ##__VA_ARGS__)
-
-
-#define _LOQspecial(eval, cat, fmt, ...) do { static int _index; if(_index == 0) \
-    _index = ++g_log_index; loq(_index, cat, \
-    &__FUNCTION__[5], eval, (int) ret, fmt, ##__VA_ARGS__); } while (0)
-
-#define LOQspecial_ntstatus(cat, fmt, ...) _LOQspecial(NT_SUCCESS(ret), cat, fmt, ##__VA_ARGS__)
-#define LOQspecial_bool(cat, fmt, ...) _LOQspecial(ret != FALSE, cat, fmt, ##__VA_ARGS__)
-#define LOQspecial_hresult(cat, fmt, ...) _LOQspecial(ret == S_OK, cat, fmt, ##__VA_ARGS__)
 
 #define ENSURE_DWORD(param) \
     DWORD _##param = 0; if(param == NULL) param = &_##param

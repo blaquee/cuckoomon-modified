@@ -2,7 +2,7 @@
 
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Accuvant, Inc. (bspengler@accuvant.com)
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -206,8 +206,8 @@ static void hook_create_pre_tramp(hook_t *h)
 		0xff, 0x74, 0x24, 0x24,
 		// push ebp
 		0x55,
-		// push h->allow_hook_recursion
-		0x6a, h->allow_hook_recursion,
+		// push h
+		0x68, 0x00, 0x00, 0x00, 0x00,
 		// call enter_hook, returns 0 if we should call the original func, otherwise 1 if we should call our New_ version
 		0xe8, 0x00, 0x00, 0x00, 0x00
 	};
@@ -231,12 +231,14 @@ static void hook_create_pre_tramp(hook_t *h)
 	};
 
 #if DISABLE_HOOK_CONTENT
-	emit_rel(pre_tramp1 + 1, h->pre_tramp + 1, h->tramp);
+	emit_rel(pre_tramp1 + 1, h->hookdata->pre_tramp + 1, h->hookdata->tramp);
 #endif
 
 	p = h->hookdata->pre_tramp;
 	off = sizeof(pre_tramp1) - sizeof(unsigned int);
 	emit_rel(pre_tramp1 + off, p + off, (unsigned char *)&enter_hook);
+	off = sizeof(pre_tramp1) - 1 - (2 * sizeof(unsigned int));
+	*(DWORD *)(pre_tramp1 + off) = (DWORD)h;
 	memcpy(p, pre_tramp1, sizeof(pre_tramp1));
 	p += sizeof(pre_tramp1);
 
@@ -248,7 +250,121 @@ static void hook_create_pre_tramp(hook_t *h)
 	off = sizeof(pre_tramp3) - sizeof(unsigned int);
 	emit_rel(pre_tramp3 + off, p + off, h->new_func);
 	memcpy(p, pre_tramp3, sizeof(pre_tramp3));
+	p += sizeof(pre_tramp3);
+
+	assert ((ULONG_PTR)(p - h->hookdata->pre_tramp) < MAX_PRETRAMP_SIZE);
 }
+
+static void hook_create_pre_tramp_notail(hook_t *h)
+{
+	unsigned char *p;
+	unsigned int off;
+
+	unsigned char pre_tramp1[] = {
+#if DISABLE_HOOK_CONTENT
+		0xe9, 0x00, 0x00, 0x00, 0x00,
+#endif
+		// pushf
+		0x9c,
+		// pusha
+		0x60,
+		// cld
+		0xfc,
+		// push dword ptr [esp+36]
+		0xff, 0x74, 0x24, 0x24,
+		// push ebp
+		0x55,
+		// push h
+		0x68, 0x00, 0x00, 0x00, 0x00,
+		// call enter_hook, returns 0 if we should call the original func, otherwise 1 if we should call our New_ version
+		0xe8, 0x00, 0x00, 0x00, 0x00
+	};
+	unsigned char pre_tramp2[] = {
+		// test eax, eax
+		0x85, 0xc0,
+		// jnz 0x7
+		0x75, 0x07,
+		// popad
+		0x61,
+		// popf
+		0x9d,
+		// jmp h->tramp (original function)
+		0xe9, 0x00, 0x00, 0x00, 0x00
+	};
+	unsigned char pre_tramp3[] = {
+		// mov ecx, numargs
+		0xb9, h->numargs, 0x00, 0x00, 0x00,
+		// mov eax, ecx
+		0x8b, 0xc1,
+		// shl eax, 2 (eax = eax * 4)
+		0xc1, 0xe0, 0x02,
+		// lea esi, [esp+40]
+		0x8d, 0x74, 0x24, 0x28,
+		// sub esp, eax
+		0x29, 0xc4,
+		// mov edi, esp
+		0x89, 0xe7,
+		// repne movsd
+		0xf2, 0xa5,
+		// call h->new_func
+		0xe8, 0x00, 0x00, 0x00, 0x00
+	};
+	unsigned char pre_tramp4[] = {
+		// test eax, eax
+		0x85, 0xc0,
+		// jnz 0x7
+		0x75, 0x07,
+		// popad
+		0x61,
+		// popf
+		0x9d,
+		// jmp h->tramp (original function)
+		0xe9, 0x00, 0x00, 0x00, 0x00
+	};
+	unsigned char pre_tramp5[] = {
+		// popad
+		0x61,
+		// popf
+		0x9d,
+		// jmp h->alt_func
+		0xe9, 0x00, 0x00, 0x00, 0x00
+	};
+
+#if DISABLE_HOOK_CONTENT
+	emit_rel(pre_tramp1 + 1, h->hookdata->pre_tramp + 1, h->hookdata->tramp);
+#endif
+
+	p = h->hookdata->pre_tramp;
+	off = sizeof(pre_tramp1) - sizeof(unsigned int);
+	emit_rel(pre_tramp1 + off, p + off, (unsigned char *)&enter_hook);
+	off = sizeof(pre_tramp1) - 1 - (2 * sizeof(unsigned int));
+	*(DWORD *)(pre_tramp1 + off) = (DWORD)h;
+	memcpy(p, pre_tramp1, sizeof(pre_tramp1));
+	p += sizeof(pre_tramp1);
+
+	off = sizeof(pre_tramp2) - sizeof(unsigned int);
+	emit_rel(pre_tramp2 + off, p + off, h->hookdata->tramp);
+	memcpy(p, pre_tramp2, sizeof(pre_tramp2));
+	p += sizeof(pre_tramp2);
+
+	off = sizeof(pre_tramp3) - sizeof(unsigned int);
+	emit_rel(pre_tramp3 + off, p + off, h->new_func);
+	memcpy(p, pre_tramp3, sizeof(pre_tramp3));
+	p += sizeof(pre_tramp3);
+
+	off = sizeof(pre_tramp4) - sizeof(unsigned int);
+	emit_rel(pre_tramp4 + off, p + off, h->hookdata->tramp);
+	memcpy(p, pre_tramp4, sizeof(pre_tramp4));
+	p += sizeof(pre_tramp4);
+
+	off = sizeof(pre_tramp5) - sizeof(unsigned int);
+	emit_rel(pre_tramp5 + off, p + off, h->alt_func);
+	memcpy(p, pre_tramp5, sizeof(pre_tramp5));
+	p += sizeof(pre_tramp5);
+
+	assert ((ULONG_PTR)(p - h->hookdata->pre_tramp) < MAX_PRETRAMP_SIZE);
+}
+
 
 static int hook_api_jmp_direct(hook_t *h, unsigned char *from,
     unsigned char *to)
@@ -544,8 +660,7 @@ int hook_api(hook_t *h, int type)
 	if (!memcmp(addr, "\xeb\x05", 2) &&
 		!memcmp(addr + 7, "\xff\x25", 2)) {
 		// Add unhook detection for this region.
-		unhook_detect_add_region(h->funcname,
-			addr, addr, addr, 7 + 6);
+		unhook_detect_add_region(h, addr, addr, addr, 7 + 6);
 
 		addr = **(unsigned char ***)(addr + 9);
 	}
@@ -568,8 +683,7 @@ int hook_api(hook_t *h, int type)
 		!memcmp(addr - 5, "\xcc\xcc\xcc\xcc\xcc", 5)) {
 
 		// Add unhook detection for this region.
-		unhook_detect_add_region(h->funcname,
-			addr - 5, addr - 5, addr - 5, 5 + 2);
+		unhook_detect_add_region(h, addr - 5, addr - 5, addr - 5, 5 + 2);
 
 		// step over the short jump and the relative offset
 		addr += 4;
@@ -600,20 +714,25 @@ int hook_api(hook_t *h, int type)
 			uint8_t orig[16];
 			memcpy(orig, addr, 16);
 
-			hook_create_pre_tramp(h);
+			if (h->notail)
+				hook_create_pre_tramp_notail(h);
+			else
+				hook_create_pre_tramp(h);
 
 			// insert the hook (jump from the api to the
 			// pre-trampoline)
 			ret = hook_types[type].hook(h, addr, h->hookdata->pre_tramp);
 
 			// Add unhook detection for our newly created hook.
-			// Ensure any changes behind our hook are also catched by
+			// Ensure any changes behind our hook are also caught by
 			// making the buffersize 16.
-			unhook_detect_add_region(h->funcname, addr, orig, addr, 16);
+			unhook_detect_add_region(h, addr, orig, addr, 16);
 
 			// if successful, assign the trampoline address to *old_func
 			if (ret == 0) {
-				*h->old_func = h->hookdata->tramp;
+				// This will be NULL in cases where we don't care to call the original function from our hook (NOTAIL)
+				if (h->old_func)
+					*h->old_func = h->hookdata->tramp;
 
 				// successful hook is successful
 				h->is_hooked = 1;

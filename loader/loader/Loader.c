@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Accuvant, Inc. (bspengler@accuvant.com)
+// Copyright 2014-2015 Optiv, Inc. (brad.spengler@optiv.com)
 // This file is published under the GNU GPL v3
 // http://www.gnu.org/licenses/gpl.html
 
@@ -297,7 +297,7 @@ out:
 	return ret;
 }
 
-static void fixpe(char *buf, DWORD bufsize)
+static void fixpe(ULONG_PTR base, char *buf, DWORD bufsize)
 {
 	PIMAGE_DOS_HEADER doshdr;
 	PIMAGE_NT_HEADERS nthdr;
@@ -321,6 +321,7 @@ static void fixpe(char *buf, DWORD bufsize)
 
 	if (nthdr->FileHeader.Machine == IMAGE_FILE_MACHINE_I386) {
 		nthdr32 = (PIMAGE_NT_HEADERS32)nthdr;
+		nthdr32->OptionalHeader.ImageBase = (DWORD)base;
 		numsecs = nthdr32->FileHeader.NumberOfSections;
 		if (bufsize < sizeof(IMAGE_NT_HEADERS32) - sizeof(IMAGE_OPTIONAL_HEADER32) + sizeof(IMAGE_DOS_HEADER) + nthdr32->FileHeader.SizeOfOptionalHeader + (numsecs * sizeof(IMAGE_SECTION_HEADER)))
 			return;
@@ -329,9 +330,16 @@ static void fixpe(char *buf, DWORD bufsize)
 			sechdr[i].PointerToRawData = sechdr[i].VirtualAddress;
 			sechdr[i].SizeOfRawData = sechdr[i].Misc.VirtualSize;
 		}
+		// zero out the relocation table since relocations have already been applied
+		if (nthdr32->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC) {
+			nthdr32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress = 0;
+			nthdr32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = 0;
+			nthdr32->FileHeader.Characteristics |= IMAGE_FILE_RELOCS_STRIPPED;
+		}
 	}
 	else if (nthdr->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64) {
 		nthdr64 = (PIMAGE_NT_HEADERS64)nthdr;
+		nthdr64->OptionalHeader.ImageBase = base;
 		numsecs = nthdr64->FileHeader.NumberOfSections;
 		if (bufsize < sizeof(IMAGE_NT_HEADERS64) - sizeof(IMAGE_OPTIONAL_HEADER64) + sizeof(IMAGE_DOS_HEADER) + nthdr64->FileHeader.SizeOfOptionalHeader + (numsecs * sizeof(IMAGE_SECTION_HEADER)))
 			return;
@@ -339,6 +347,12 @@ static void fixpe(char *buf, DWORD bufsize)
 		for (i = 0; i < numsecs; i++) {
 			sechdr[i].PointerToRawData = sechdr[i].VirtualAddress;
 			sechdr[i].SizeOfRawData = sechdr[i].Misc.VirtualSize;
+		}
+		// zero out the relocation table since relocations have already been applied
+		if (nthdr64->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC) {
+			nthdr64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress = 0;
+			nthdr64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = 0;
+			nthdr64->FileHeader.Characteristics |= IMAGE_FILE_RELOCS_STRIPPED;
 		}
 	}
 
@@ -388,7 +402,7 @@ static int dump(int pid, char *dumpfile)
 					WriteFile(f, &meminfo.State, sizeof(meminfo.State), &byteswritten, NULL);
 					WriteFile(f, &meminfo.Type, sizeof(meminfo.Type), &byteswritten, NULL);
 					WriteFile(f, &meminfo.Protect, sizeof(meminfo.Protect), &byteswritten, NULL);
-					fixpe(buf, bufsize);
+					fixpe((ULONG_PTR)addr, buf, bufsize);
 					WriteFile(f, buf, bufsize, &byteswritten, NULL);
 				}
 				free(buf);

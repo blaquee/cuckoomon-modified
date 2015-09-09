@@ -283,6 +283,14 @@ extern HOOKDEF(HRESULT, WINAPI, SHGetFolderPathW,
 	_Out_ LPWSTR pszPath
 );
 
+extern HOOKDEF(DWORD_PTR, WINAPI, SHGetFileInfoW,
+	_In_    LPCWSTR    pszPath,
+	DWORD      dwFileAttributes,
+	_Inout_ SHFILEINFOW *psfi,
+	UINT       cbFileInfo,
+	UINT       uFlags
+);
+
 extern HOOKDEF(BOOL, WINAPI, GetFileVersionInfoW,
 	_In_        LPCWSTR lptstrFilename,
 	_Reserved_  DWORD dwHandle,
@@ -627,7 +635,7 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtSaveKeyEx,
 // Window Hooks
 //
 
-extern HOOKDEF(HWND, WINAPI, CreateWindowExA,
+extern HOOKDEF_NOTAIL(WINAPI, CreateWindowExA,
 	__in DWORD dwExStyle,
 	__in_opt LPCSTR lpClassName,
 	__in_opt LPCSTR lpWindowName,
@@ -642,7 +650,7 @@ extern HOOKDEF(HWND, WINAPI, CreateWindowExA,
 	__in_opt LPVOID lpParam
 );
 
-extern HOOKDEF(HWND, WINAPI, CreateWindowExW,
+extern HOOKDEF_NOTAIL(WINAPI, CreateWindowExW,
 	__in DWORD dwExStyle,
 	__in_opt LPWSTR lpClassName,
 	__in_opt LPWSTR lpWindowName,
@@ -892,7 +900,7 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtOpenSection,
     __in   POBJECT_ATTRIBUTES ObjectAttributes
 );
 
-extern HOOKDEF2(BOOL, WINAPI, CreateProcessInternalW,
+extern HOOKDEF(BOOL, WINAPI, CreateProcessInternalW,
     __in_opt    LPVOID lpUnknown1,
     __in_opt    LPWSTR lpApplicationName,
     __inout_opt LPWSTR lpCommandLine,
@@ -917,7 +925,7 @@ extern HOOKDEF(NTSTATUS, WINAPI, DbgUiWaitStateChange,
 	__in_opt PLARGE_INTEGER Timeout
 );
 
-extern HOOKDEF(BOOLEAN, WINAPI, RtlDispatchException,
+extern HOOKDEF_NOTAIL(WINAPI, RtlDispatchException,
 	__in PEXCEPTION_RECORD ExceptionRecord,
 	__in PCONTEXT Context
 );
@@ -936,7 +944,7 @@ extern HOOKDEF(DWORD, WINAPI, GetLastError,
 	void
 );
 
-extern HOOKDEF2(HRESULT, WINAPI, CoCreateInstance,
+extern HOOKDEF(HRESULT, WINAPI, CoCreateInstance,
 	__in    REFCLSID rclsid,
 	__in	LPUNKNOWN pUnkOuter,
 	__in	DWORD dwClsContext,
@@ -1034,6 +1042,15 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThread,
 	__in_opt PVOID ApcRoutineContext,
 	__in_opt PIO_STATUS_BLOCK ApcStatusBlock,
 	__in_opt ULONG ApcReserved
+);
+
+extern HOOKDEF(NTSTATUS, WINAPI, NtQueueApcThreadEx,
+	__in HANDLE ThreadHandle,
+	__in_opt HANDLE UserApcReserveHandle,
+	__in PIO_APC_ROUTINE ApcRoutine,
+	__in_opt PVOID ApcRoutineContext,
+	__in_opt PIO_STATUS_BLOCK ApcStatusBlock,
+	__in_opt PVOID ApcReserved
 );
 
 extern HOOKDEF(NTSTATUS, WINAPI, NtCreateThread,
@@ -1215,9 +1232,34 @@ extern HOOKDEF(DWORD, WINAPI, timeGetTime,
 	void
 );
 
-extern HOOKDEF(BOOL, WINAPI, ExitWindowsEx,
+extern HOOKDEF_NOTAIL(WINAPI, ExitWindowsEx,
     __in  UINT uFlags,
     __in  DWORD dwReason
+);
+
+extern HOOKDEF_NOTAIL(WINAPI, InitiateShutdownW,
+	_In_opt_ LPWSTR lpMachineName,
+	_In_opt_ LPWSTR lpMessage,
+	_In_     DWORD  dwGracePeriod,
+	_In_     DWORD  dwShutdownFlags,
+	_In_     DWORD  dwReason
+);
+
+extern HOOKDEF_NOTAIL(WINAPI, InitiateSystemShutdownW,
+	_In_opt_ LPWSTR lpMachineName,
+	_In_opt_ LPWSTR lpMessage,
+	_In_     DWORD  dwTimeout,
+	_In_     BOOL	bForceAppsClosed,
+	_In_     BOOL	bRebootAfterShutdown
+);
+
+extern HOOKDEF_NOTAIL(WINAPI, InitiateSystemShutdownExW,
+	_In_opt_ LPWSTR lpMachineName,
+	_In_opt_ LPWSTR lpMessage,
+	_In_     DWORD  dwTimeout,
+	_In_     BOOL	bForceAppsClosed,
+	_In_     BOOL	bRebootAfterShutdown,
+	_In_	 DWORD	dwReason
 );
 
 extern HOOKDEF(BOOL, WINAPI, IsDebuggerPresent,
@@ -1551,6 +1593,36 @@ extern HOOKDEF(BOOL, WINAPI, HttpSendRequestW,
     __in  DWORD dwOptionalLength
 );
 
+extern HOOKDEF(BOOL, WINAPI, HttpSendRequestExA,
+	__in  HINTERNET hRequest,
+	__in  LPINTERNET_BUFFERSA lpBuffersIn,
+	__out LPINTERNET_BUFFERSA lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpSendRequestExW,
+	__in  HINTERNET hRequest,
+	__in  LPINTERNET_BUFFERSW lpBuffersIn,
+	__out LPINTERNET_BUFFERSW lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpAddRequestHeadersA,
+	__in HINTERNET hRequest,
+	__in LPCSTR lpszHeaders,
+	__in DWORD dwHeadersLength,
+	__in DWORD dwModifiers
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpAddRequestHeadersW,
+	__in HINTERNET hRequest,
+	__in LPCWSTR lpszHeaders,
+	__in DWORD dwHeadersLength,
+	__in DWORD dwModifiers
+);
+
 extern HOOKDEF(BOOL, WINAPI, InternetReadFile,
     _In_   HINTERNET hFile,
     _Out_  LPVOID lpBuffer,
@@ -1663,6 +1735,31 @@ extern HOOKDEF(ULONG, WINAPI, NetUserGetLocalGroups,
 	_In_  DWORD   prefmaxlen,
 	_Out_ LPDWORD entriesread,
 	_Out_ LPDWORD totalentries
+);
+
+extern HOOKDEF(HRESULT, WINAPI, CoInternetSetFeatureEnabled,
+	INTERNETFEATURELIST FeatureEntry,
+	_In_ DWORD			dwFlags,
+	BOOL				fEnable
+);
+
+extern HOOKDEF(int, WINAPI, NSPStartup,
+	__in LPGUID lpProviderId,
+	__out PVOID lpnspRoutines
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpEndRequestA,
+	__in  HINTERNET hRequest,
+	__out LPINTERNET_BUFFERSA lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpEndRequestW,
+	__in  HINTERNET hRequest,
+	__out LPINTERNET_BUFFERSW lpBuffersOut,
+	__in  DWORD dwFlags,
+	__in  DWORD_PTR dwContext
 );
 
 //
@@ -2148,18 +2245,43 @@ extern HOOKDEF(HRESULT, WINAPI, HTTPSFinalProv,
 	PVOID data // PCRYPT_PROVIDER_DATA
 );
 
+extern HOOKDEF(BOOL, WINAPI, CryptDecodeObjectEx,
+	_In_          DWORD              dwCertEncodingType,
+	_In_          LPCSTR             lpszStructType,
+	_In_    const BYTE               *pbEncoded,
+	_In_          DWORD              cbEncoded,
+	_In_          DWORD              dwFlags,
+	_In_          PCRYPT_DECODE_PARA pDecodePara,
+	_Out_         void               *pvStructInfo,
+	_Inout_       DWORD              *pcbStructInfo
+);
+
+extern HOOKDEF(BOOL, WINAPI, CryptImportPublicKeyInfo,
+	_In_  HCRYPTPROV            hCryptProv,
+	_In_  DWORD                 dwCertEncodingType,
+	_In_  PCERT_PUBLIC_KEY_INFO pInfo,
+	_Out_ HCRYPTKEY             *phKey
+);
+
 //
 // Special Hooks
 //
 
-extern HOOKDEF2(NTSTATUS, WINAPI, LdrLoadDll,
+extern HOOKDEF_NOTAIL(WINAPI, LdrLoadDll,
     __in_opt    PWCHAR PathToFile,
     __in_opt    PULONG Flags,
     __in        PUNICODE_STRING ModuleFileName,
     __out       PHANDLE ModuleHandle
 );
 
-extern HOOKDEF2(NTSTATUS, WINAPI, LdrUnloadDll,
+extern HOOKDEF_ALT(NTSTATUS, WINAPI, LdrLoadDll,
+	__in_opt    PWCHAR PathToFile,
+	__in_opt    PULONG Flags,
+	__in        PUNICODE_STRING ModuleFileName,
+	__out       PHANDLE ModuleHandle
+);
+
+extern HOOKDEF_NOTAIL(WINAPI, LdrUnloadDll,
 	PVOID DllImageBase
 );
 
@@ -2176,7 +2298,7 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtMapViewOfSection,
     __in     ULONG Win32Protect
 );
 
-extern HOOKDEF2(int, WINAPI, JsEval,
+extern HOOKDEF(int, WINAPI, JsEval,
 	PVOID Arg1,
 	PVOID Arg2,
 	PVOID Arg3,
@@ -2184,7 +2306,7 @@ extern HOOKDEF2(int, WINAPI, JsEval,
 	DWORD *scriptobj
 );
 
-extern HOOKDEF2(int, WINAPI, COleScript_ParseScriptText,
+extern HOOKDEF(int, WINAPI, COleScript_ParseScriptText,
 	PVOID Arg1,
 	PWCHAR ScriptBuf,
 	PVOID Arg3,
@@ -2197,21 +2319,21 @@ extern HOOKDEF2(int, WINAPI, COleScript_ParseScriptText,
 	PVOID Arg10
 );
 
-extern HOOKDEF2(PVOID, WINAPI, JsParseScript,
+extern HOOKDEF(PVOID, WINAPI, JsParseScript,
 	const wchar_t *script,
 	PVOID SourceContext,
 	const wchar_t *sourceUrl,
 	PVOID *result
 );
 
-extern HOOKDEF2(PVOID, WINAPI, JsRunScript,
+extern HOOKDEF(PVOID, WINAPI, JsRunScript,
 	const wchar_t *script,
 	PVOID SourceContext,
 	const wchar_t *sourceUrl,
 	PVOID *result
 );
 
-extern HOOKDEF2(int, WINAPI, CDocument_write,
+extern HOOKDEF(int, WINAPI, CDocument_write,
 	PVOID this,
 	SAFEARRAY *psa
 );

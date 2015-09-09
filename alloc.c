@@ -1,3 +1,20 @@
+/*
+Copyright(C) 2014,2015 Optiv, Inc. (brad.spengler@optiv.com)
+
+This program is free software : you can redistribute it and / or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include "hooking.h"
 #include "alloc.h"
 #include <Windows.h>
@@ -50,11 +67,15 @@ void *cm_alloc(size_t size)
 	struct cm_alloc_header *hdr;
 	DWORD oldprot;
 	LONG status;
-	
+	lasterror_t lasterror;
+
+	get_lasterrors(&lasterror);
 	status = pNtAllocateVirtualMemory(GetCurrentProcess(), &BaseAddress, 0, &RegionSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
-	if (status < 0)
+	if (status < 0) {
+		set_lasterrors(&lasterror);
 		return NULL;
+	}
 	hdr = (struct cm_alloc_header *)BaseAddress;
 	hdr->Magic = CM_ALLOC_MAGIC;
 	hdr->Used = size + CM_ALLOC_METASIZE;
@@ -62,7 +83,7 @@ void *cm_alloc(size_t size)
 
 	// add a guard page to the end of every allocation
 	assert(VirtualProtect((PCHAR)BaseAddress + RegionSize - 0x1000, 0x1000, PAGE_NOACCESS, &oldprot));
-
+	set_lasterrors(&lasterror);
 	return (PCHAR)BaseAddress + CM_ALLOC_METASIZE;
 }
 
@@ -72,7 +93,9 @@ void cm_free(void *ptr)
 	SIZE_T RegionSize;
 	LONG status;
 	struct cm_alloc_header *hdr;
+	lasterror_t lasterror:
 
+	get_lasterrors(&lasterror);
 	hdr = GET_CM_ALLOC_HEADER(ptr);
 
 	assert(hdr->Magic == CM_ALLOC_MAGIC);
@@ -80,6 +103,7 @@ void cm_free(void *ptr)
 	RegionSize = 0;
 	status = pNtFreeVirtualMemory(GetCurrentProcess(), &BaseAddress, &RegionSize, MEM_RELEASE);
 	assert(status >= 0);
+	set_lasterrors(&lasterror);
 }
 
 void *cm_realloc(void *ptr, size_t size)

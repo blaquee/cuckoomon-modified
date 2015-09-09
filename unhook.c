@@ -1,6 +1,6 @@
 /*
 Cuckoo Sandbox - Automated Malware Analysis
-Copyright (C) 2010-2014 Cuckoo Sandbox Developers
+Copyright (C) 2010-2015 Cuckoo Sandbox Developers, Optiv, Inc. (brad.spengler@optiv.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -40,7 +40,7 @@ static uint32_t g_length[UNHOOK_MAXCOUNT];
 static uint8_t *g_addr[UNHOOK_MAXCOUNT];
 
 // Function name of the region.
-static char g_funcname[UNHOOK_MAXCOUNT][64];
+static const hook_t *g_unhook_hooks[UNHOOK_MAXCOUNT];
 
 // The original contents of this region, before we modified it.
 static uint8_t g_orig[UNHOOK_MAXCOUNT][UNHOOK_BUFSIZE];
@@ -62,7 +62,7 @@ int address_already_hooked(uint8_t *addr)
 	return 0;
 }
 
-void unhook_detect_add_region(const char *funcname, uint8_t *addr,
+void unhook_detect_add_region(const hook_t *hook, uint8_t *addr,
     const uint8_t *orig, const uint8_t *our, uint32_t length)
 {
     if(g_index == UNHOOK_MAXCOUNT) {
@@ -73,15 +73,12 @@ void unhook_detect_add_region(const char *funcname, uint8_t *addr,
 	if (address_already_hooked(addr))
 		return;
 
-    g_length[g_index] = length;
+	g_length[g_index] = MIN(length, UNHOOK_BUFSIZE);
     g_addr[g_index] = addr;
+	g_unhook_hooks[g_index] = hook;
 
-    if(funcname != NULL) {
-        strncpy(g_funcname[g_index], funcname, sizeof(g_funcname[g_index]) - 1);
-    }
-
-    memcpy(g_orig[g_index], orig, MIN(length, UNHOOK_BUFSIZE));
-    memcpy(g_our[g_index], our, MIN(length, UNHOOK_BUFSIZE));
+	memcpy(g_orig[g_index], orig, g_length[g_index]);
+	memcpy(g_our[g_index], our, g_length[g_index]);
     g_index++;
 }
 
@@ -98,7 +95,7 @@ void restore_hooks_on_range(ULONG_PTR start, ULONG_PTR end)
 				continue;
 			if (!memcmp(g_orig[idx], g_addr[idx], g_length[idx])) {
 				memcpy(g_addr[idx], g_our[idx], g_length[idx]);
-				log_hook_restoration(g_funcname[idx]);
+				log_hook_restoration(g_unhook_hooks[idx]->funcname);
 			}
 		}
 	}
@@ -152,12 +149,12 @@ static DWORD WINAPI _unhook_detect_thread(LPVOID param)
 							char *tmpbuf2;
 							tmpbuf2 = tmpbuf = malloc(g_length[idx]);
 							memcpy(tmpbuf, g_addr[idx], g_length[idx]);
-							log_hook_modification(g_funcname[idx], g_our[idx], tmpbuf, g_length[idx]);
+							log_hook_modification(g_unhook_hooks[idx]->funcname, g_our[idx], tmpbuf, g_length[idx]);
 							tmpbuf = NULL;
 							free(tmpbuf2);
 						} 
 						else
-							log_hook_removal(g_funcname[idx]);
+							log_hook_removal(g_unhook_hooks[idx]->funcname);
 					}
 					g_hook_reported[idx] = 1;
 				}
@@ -242,6 +239,64 @@ int terminate_event_init()
 	pipe("CRITICAL:Error initializing terminate event thread!");
 	return -1;
 }
+
+static HANDLE g_procname_watch_thread_handle;
+
+static UNICODE_STRING InitialProcessName;
+static UNICODE_STRING InitialProcessPath;
+
+static DWORD WINAPI _procname_watch_thread(LPVOID param)
+{
+	hook_disable();
+
+	while (1) {
+		LDR_MODULE *mod; PEB *peb = (PEB *)get_peb();
+		__try {
+			mod = (LDR_MODULE *)peb->LoaderData->InLoadOrderModuleList.Flink;
+			if (InitialProcessName.Length != mod->BaseDllName.Length || InitialProcessPath.Length != mod->FullDllName.Length || 
+				memcmp(InitialProcessName.Buffer, mod->BaseDllName.Buffer, InitialProcessName.Length) ||
+				memcmp(InitialProcessPath.Buffer, mod->FullDllName.Buffer, InitialProcessPath.Length)) {
+				// allow concurrent modifications to settle, as malware doesn't particularly care about proper locking
+				Sleep(50);
+
+				log_procname_anomaly(&InitialProcessName, &InitialProcessPath, &mod->BaseDllName, &mod->FullDllName);
+			}
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			;
+		}
+
+		Sleep(1000);
+	}
+
+	return 0;
+}
+
+DWORD g_procname_watcher_thread_id;
+
+int procname_watch_init()
+{
+	LDR_MODULE *mod; PEB *peb = (PEB *)get_peb();
+	mod = (LDR_MODULE *)peb->LoaderData->InLoadOrderModuleList.Flink;
+
+	InitialProcessName.MaximumLength = InitialProcessName.Length = mod->BaseDllName.Length;
+	InitialProcessName.Buffer = malloc(InitialProcessName.Length);
+	memcpy(InitialProcessName.Buffer, mod->BaseDllName.Buffer, InitialProcessName.Length);
+
+	InitialProcessPath.MaximumLength = InitialProcessPath.Length = mod->FullDllName.Length;
+	InitialProcessPath.Buffer = malloc(InitialProcessPath.Length);
+	memcpy(InitialProcessPath.Buffer, mod->FullDllName.Buffer, InitialProcessPath.Length);
+
+	g_procname_watch_thread_handle =
+		CreateThread(NULL, 0, &_procname_watch_thread, NULL, 0, &g_procname_watcher_thread_id);
+
+	if (g_procname_watch_thread_handle != NULL)
+		return 0;
+
+	pipe("CRITICAL:Error initializing terminate event thread!");
+	return -1;
+}
+
 
 DWORD g_watchdog_thread_id;
 
