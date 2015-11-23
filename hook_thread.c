@@ -134,7 +134,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateThread,
 	if (NT_SUCCESS(ret)) {
 		//if (called_by_hook() && pid == GetCurrentProcessId())
 		//	add_ignored_thread((DWORD)ClientId->UniqueThread);
-		pipe("PROCESS:%d:%d,%d", is_suspended(pid, (DWORD)ClientId->UniqueThread), pid, (DWORD)ClientId->UniqueThread);
+		pipe("PROCESS:%d:%d,%d", is_suspended(pid, (DWORD)(ULONG_PTR)ClientId->UniqueThread), pid, (DWORD)(ULONG_PTR)ClientId->UniqueThread);
 		if (CreateSuspended == FALSE) {
 			lasterror_t lasterror;
 			get_lasterrors(&lasterror);
@@ -300,6 +300,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtResumeThread,
     return ret;
 }
 
+extern DWORD tmphookinfo_threadid;
+extern CRITICAL_SECTION g_tmp_hookinfo_lock;
+
 HOOKDEF(NTSTATUS, WINAPI, NtTerminateThread,
     __in  HANDLE ThreadHandle,
     __in  NTSTATUS ExitStatus
@@ -308,6 +311,11 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateThread,
 	DWORD pid = pid_from_thread_handle(ThreadHandle);
 	DWORD tid = tid_from_thread_handle(ThreadHandle);
 	NTSTATUS ret = 0;
+
+	if (tmphookinfo_threadid && tid == tmphookinfo_threadid) {
+		tmphookinfo_threadid = 0;
+		LeaveCriticalSection(&g_tmp_hookinfo_lock);
+	}
 
 	//remove_ignored_thread(tid);
 
@@ -320,8 +328,11 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateThread,
 	}
 
 	LOQ_ntstatus("threading", "ph", "ThreadHandle", ThreadHandle, "ExitStatus", ExitStatus);
-    ret = Old_NtTerminateThread(ThreadHandle, ExitStatus);    
-    return ret;
+    ret = Old_NtTerminateThread(ThreadHandle, ExitStatus);
+
+	disable_tail_call_optimization();
+
+	return ret;
 }
 
 HOOKDEF(HANDLE, WINAPI, CreateThread,
@@ -408,7 +419,7 @@ HOOKDEF(NTSTATUS, WINAPI, RtlCreateUserThread,
         "ThreadIdentifier", ClientId->UniqueThread);
 
 	if (NT_SUCCESS(ret)) {
-		pipe("PROCESS:%d:%d,%d", is_suspended(pid, (DWORD)ClientId->UniqueThread), pid, (DWORD)ClientId->UniqueThread);
+		pipe("PROCESS:%d:%d,%d", is_suspended(pid, (DWORD)(ULONG_PTR)ClientId->UniqueThread), pid, (DWORD)(ULONG_PTR)ClientId->UniqueThread);
 		if (CreateSuspended == FALSE) {
 			lasterror_t lasterror;
 			get_lasterrors(&lasterror);

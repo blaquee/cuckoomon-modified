@@ -114,6 +114,17 @@ void addr_to_string(const IN_ADDR addr, char *string)
 	num_to_string(string+strlen(string), 4, chunk[3]);
 }
 
+int is_stack_pivoted(void)
+{
+	hook_info_t *hookinfo = hook_info();
+	ULONG_PTR bottom, top;
+	bottom = get_stack_bottom();
+	top = get_stack_top();
+	if (hookinfo->stack_pointer >= bottom && hookinfo->stack_pointer < top)
+		return 0;
+	return 1;
+}
+
 void replace_string_in_buf(PCHAR buf, ULONG len, PCHAR findstr, PCHAR repstr)
 {
 	unsigned int findlen = (unsigned int)strlen(findstr);
@@ -217,6 +228,13 @@ void perform_device_fakery(PVOID OutputBuffer, ULONG OutputBufferLength, ULONG I
 	}
 }
 
+void perform_create_time_fakery(FILETIME *createtime)
+{
+	createtime->dwHighDateTime = 0x1CA0431;
+	if (createtime->dwLowDateTime == 0xFDB0C77C)
+		createtime->dwLowDateTime++;
+}
+
 void perform_ascii_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength)
 {
 	if (keypath == NULL || Data == NULL)
@@ -245,6 +263,7 @@ void perform_ascii_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLength
 
 	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosVersion")) {
 		replace_string_in_buf(Data, DataLength, "VBOX", "DELL");
+		replace_string_in_buf(Data, DataLength, "BOCHS", "Award");
 	}
 
 	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\VideoBiosVersion")) {
@@ -303,6 +322,7 @@ void perform_unicode_registry_fakery(PWCHAR keypath, LPVOID Data, ULONG DataLeng
 
 	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosVersion")) {
 		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"VBOX", L"DELL");
+		replace_wstring_in_buf(Data, DataLength / sizeof(wchar_t), L"BOCHS", L"Award");
 	}
 
 	if (!wcsicmp(keypath, L"HKEY_LOCAL_MACHINE\\HARDWARE\\Description\\System\\SystemBiosDate")) {
@@ -453,7 +473,7 @@ DWORD pid_from_thread_handle(HANDLE thread_handle)
 	memset(&cid, 0, sizeof(cid));
 
 	ret = cid_from_thread_handle(thread_handle, &cid);
-	return (DWORD)cid.UniqueProcess;
+	return (DWORD)(ULONG_PTR)cid.UniqueProcess;
 }
 
 DWORD tid_from_thread_handle(HANDLE thread_handle)
@@ -464,9 +484,21 @@ DWORD tid_from_thread_handle(HANDLE thread_handle)
 	memset(&cid, 0, sizeof(cid));
 
 	ret = cid_from_thread_handle(thread_handle, &cid);
-	return (DWORD)cid.UniqueThread;
+	return (DWORD)(ULONG_PTR)cid.UniqueThread;
 }
 
+DWORD our_getprocessid(HANDLE Process)
+{
+	DWORD ret;
+	lasterror_t lasterror;
+	get_lasterrors(&lasterror);
+	if (Process == NtCurrentProcess())
+		ret = GetCurrentProcessId();
+	else
+		ret = GetProcessId(Process);
+	set_lasterrors(&lasterror);
+	return ret;
+}
 
 DWORD random()
 {
@@ -1315,11 +1347,11 @@ BOOLEAN is_suspended(DWORD pid, DWORD tid)
 	// now we have a valid list of process information
 	for (proc = pspi; proc->NextEntryOffset; proc = (PSYSTEM_PROCESS_INFORMATION)((PCHAR)proc + proc->NextEntryOffset)) {
 		ULONG i;
-		if (proc->UniqueProcessId != (HANDLE)pid)
+		if ((DWORD)(ULONG_PTR)proc->UniqueProcessId != pid)
 			continue;
 		for (i = 0; i < proc->NumberOfThreads; i++) {
 			PSYSTEM_THREAD thread = &proc->Threads[i];
-			if (tid && thread->ClientId.UniqueThread != (HANDLE)tid)
+			if (tid && (DWORD)(ULONG_PTR)thread->ClientId.UniqueThread != tid)
 				continue;
 			if (thread->WaitReason != Suspended)
 				goto out;

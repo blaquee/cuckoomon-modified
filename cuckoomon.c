@@ -80,6 +80,7 @@ static hook_t g_hooks[] = {
 	//HOOK_SPECIAL(ntdll, NtTerminateThread),
 
 	// has special handling
+
 	HOOK_SPECIAL(jscript, COleScript_ParseScriptText),
 	HOOK_SPECIAL(jscript, JsEval),
 	HOOK_SPECIAL(jscript9, JsParseScript),
@@ -90,6 +91,7 @@ static hook_t g_hooks[] = {
 	HOOK_SPECIAL(ole32, CoCreateInstance),
 
 	HOOK_NOTAIL(ntdll, RtlDispatchException, 2),
+	HOOK_NOTAIL(ntdll, NtRaiseException, 3),
 
 	//
     // File Hooks
@@ -107,6 +109,7 @@ static hook_t g_hooks[] = {
     HOOK(ntdll, NtSetInformationFile),
     HOOK(ntdll, NtOpenDirectoryObject),
     HOOK(ntdll, NtCreateDirectoryObject),
+    HOOK(ntdll, NtQueryDirectoryObject),
 
     // CreateDirectoryExA calls CreateDirectoryExW
     // CreateDirectoryW does not call CreateDirectoryExW
@@ -119,8 +122,9 @@ static hook_t g_hooks[] = {
     // lowest variant of MoveFile()
     HOOK(kernel32, MoveFileWithProgressW),
 
-    HOOK(kernel32, FindFirstFileExA),
+	HOOK(kernel32, FindFirstFileExA),
     HOOK(kernel32, FindFirstFileExW),
+
 	HOOK(kernel32, FindNextFileW),
 
     // Covered by NtCreateFile() but still grab this information
@@ -138,6 +142,7 @@ static hook_t g_hooks[] = {
     HOOK(kernel32, GetDiskFreeSpaceW),
 
 	HOOK(kernel32, GetVolumeNameForVolumeMountPointW),
+	HOOK(kernel32, GetVolumeInformationByHandleW),
 
 	HOOK(shell32, SHGetFolderPathW),
 	HOOK(shell32, SHGetFileInfoW),
@@ -265,7 +270,6 @@ static hook_t g_hooks[] = {
     HOOK(ntdll, NtMapViewOfSection),
 	HOOK(kernel32, WaitForDebugEvent),
 	HOOK(ntdll, DbgUiWaitStateChange),
-	HOOK(ntdll, NtRaiseException),
 
     // all variants of ShellExecute end up in ShellExecuteExW
     HOOK(shell32, ShellExecuteExW),
@@ -330,7 +334,9 @@ static hook_t g_hooks[] = {
     HOOK(advapi32, GetUserNameW),
 	HOOK(user32, GetAsyncKeyState),
 	HOOK(ntdll, NtLoadDriver),
+	HOOK(ntdll, NtSetInformationProcess),
 	HOOK(ntdll, RtlDecompressBuffer),
+	HOOK(ntdll, RtlCompressBuffer),
 	HOOK(kernel32, GetSystemInfo),
 	HOOK(ntdll, NtQuerySystemInformation),
 	HOOK(setupapi, SetupDiGetClassDevsA),
@@ -365,6 +371,8 @@ static hook_t g_hooks[] = {
 	HOOK(wininet, HttpSendRequestExW),
 	HOOK(wininet, HttpAddRequestHeadersA),
 	HOOK(wininet, HttpAddRequestHeadersW),
+	HOOK(wininet, HttpQueryInfoA),
+	HOOK(wininet, HttpQueryInfoW),
 	HOOK(wininet, HttpEndRequestA),
 	HOOK(wininet, HttpEndRequestW),
 	HOOK(wininet, InternetReadFile),
@@ -460,6 +468,7 @@ static hook_t g_hooks[] = {
     HOOK(mswsock, ConnectEx),
     HOOK(mswsock, TransmitFile),
 	HOOK(mswsock, NSPStartup),
+
     //
     // Crypto Functions
     //
@@ -570,6 +579,8 @@ VOID CALLBACK DllLoadNotification(
 
 extern _LdrRegisterDllNotification pLdrRegisterDllNotification;
 
+CRITICAL_SECTION g_tmp_hookinfo_lock;
+
 void set_hooks()
 {
 	// before modifying any DLLs, let's first freeze all other threads in our process
@@ -585,6 +596,8 @@ void set_hooks()
 	DWORD our_pid = GetCurrentProcessId();
 	// the hooks contain executable code as well, so they have to be RWX
 	DWORD old_protect;
+
+	InitializeCriticalSection(&g_tmp_hookinfo_lock);
 
 	VirtualProtect(g_hooks, sizeof(g_hooks), PAGE_EXECUTE_READWRITE,
 		&old_protect);
@@ -634,8 +647,10 @@ LONG WINAPI cuckoomon_exception_handler(
 	) {
 	char msg[16384];
 	char *dllname;
+	char *sehname;
 	unsigned int offset;
 	ULONG_PTR eip;
+	ULONG_PTR seh = 0;
 	PUCHAR eipptr;
 #ifdef _WIN64
 	ULONG_PTR *stack;
@@ -654,6 +669,11 @@ LONG WINAPI cuckoomon_exception_handler(
 	stack = (ULONG_PTR *)(ULONG_PTR)(ExceptionInfo->ContextRecord->Rsp);
 #else
 	stack = (DWORD *)(ULONG_PTR)(ExceptionInfo->ContextRecord->Esp);
+	{
+		DWORD *tebtmp = (DWORD *)NtCurrentTeb();
+		if (tebtmp[0] != 0xffffffff)
+			seh = ((DWORD *)tebtmp[0])[1];
+	}
 #endif
 
 
@@ -672,7 +692,12 @@ LONG WINAPI cuckoomon_exception_handler(
 
 	sprintf(msg, "Exception Caught! PID: %u EIP:", GetCurrentProcessId());
 	if (dllname)
-		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " %s+%x", dllname, offset);
+		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg) - 1, " %s+%x", dllname, offset);
+
+	sehname = convert_address_to_dll_name_and_offset(seh, &offset);
+	if (sehname)
+		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg) - 1, " SEH: %s+%x", sehname, offset);
+
 	snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " %.08x, Fault Address: %.08x, Esp: %.08x, Exception Code: %08x, ",
 		eip, ExceptionInfo->ExceptionRecord->ExceptionInformation[1], (ULONG_PTR)stack, ExceptionInfo->ExceptionRecord->ExceptionCode);
 	if (is_valid_address_range((ULONG_PTR)stack, 100 * sizeof(ULONG_PTR))) 
@@ -682,17 +707,20 @@ LONG WINAPI cuckoomon_exception_handler(
 		for (i = 0; i < (get_stack_top() - (ULONG_PTR)stack)/sizeof(ULONG_PTR); i++) {
 			char *buf = convert_address_to_dll_name_and_offset(stack[i], &offset);
 			if (buf) {
-				snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " %s+%x", buf, offset);
+				snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg) - 1, " %s+%x", buf, offset);
 				free(buf);
 			}
+			if (sizeof(msg) - strlen(msg) < 100)
+				goto next;
 		}
 		strcat(msg, ", ");
 	}
 	else {
 		strcat(msg, "invalid stack, ");
 	}
+next:
 	if (is_valid_address_range(eip, 16)) {
-		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), "Bytes at EIP: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+		snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg) - 1, "Bytes at EIP: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 			eipptr[0], eipptr[1], eipptr[2], eipptr[3], eipptr[4], eipptr[5], eipptr[6], eipptr[7], eipptr[8], eipptr[9], eipptr[10], eipptr[11], eipptr[12], eipptr[13], eipptr[14], eipptr[15]);
 	}
 	debug_message(msg);
@@ -796,13 +824,13 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 #if HOOKTYPE != HOOK_JMP_INDIRECT
 #error Update hook check
 #endif
-		if (((PUCHAR)ReadProcessMemory)[0] == 0xff && ((PUCHAR)ReadProcessMemory)[1] == 0x25)
+		if (((PUCHAR)WaitForDebugEvent)[0] == 0xff && ((PUCHAR)WaitForDebugEvent)[1] == 0x25)
 			goto early_abort;
 #else
 #if HOOKTYPE != HOOK_HOTPATCH_JMP_INDIRECT
 #error Update hook check
 #endif
-		if (((PUCHAR)ReadProcessMemory)[0] == 0x8b && ((PUCHAR)ReadProcessMemory)[1] == 0xff && ((PUCHAR)ReadProcessMemory)[2] == 0xff && ((PUCHAR)ReadProcessMemory)[3] == 0x25)
+		if (((PUCHAR)WaitForDebugEvent)[0] == 0x8b && ((PUCHAR)WaitForDebugEvent)[1] == 0xff && ((PUCHAR)WaitForDebugEvent)[2] == 0xff && ((PUCHAR)WaitForDebugEvent)[3] == 0x25)
 			goto early_abort;
 #endif
 

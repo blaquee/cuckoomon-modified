@@ -50,11 +50,11 @@ static BOOLEAN is_suspended(int pid, int tid)
 	// now we have a valid list of process information
 	for (proc = pspi; proc->NextEntryOffset; proc = (PSYSTEM_PROCESS_INFORMATION)((PCHAR)proc + proc->NextEntryOffset)) {
 		ULONG i;
-		if (proc->UniqueProcessId != (HANDLE)pid)
+		if ((int)(ULONG_PTR)proc->UniqueProcessId != pid)
 			continue;
 		for (i = 0; i < proc->NumberOfThreads; i++) {
 			PSYSTEM_THREAD thread = &proc->Threads[i];
-			if (tid && thread->ClientId.UniqueThread != (HANDLE)tid)
+			if (tid && (int)(ULONG_PTR)thread->ClientId.UniqueThread != tid)
 				continue;
 			if (thread->WaitReason != Suspended)
 				return FALSE;
@@ -312,7 +312,7 @@ static void fixpe(ULONG_PTR base, char *buf, DWORD bufsize)
 	if (doshdr->e_magic != IMAGE_DOS_SIGNATURE)
 		return;
 
-	if (doshdr->e_magic > bufsize - (sizeof(IMAGE_NT_HEADERS64) + sizeof(IMAGE_DOS_HEADER)))
+	if ((DWORD)doshdr->e_lfanew > bufsize - (sizeof(IMAGE_NT_HEADERS64) + sizeof(IMAGE_DOS_HEADER)))
 		return;
 
 	nthdr = (PIMAGE_NT_HEADERS)(buf + doshdr->e_lfanew);

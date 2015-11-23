@@ -135,8 +135,8 @@ HOOKDEF(NTSTATUS, WINAPI, NtSetValueKey,
     NTSTATUS ret = Old_NtSetValueKey(KeyHandle, ValueName, TitleIndex,
         Type, Data, DataSize);
     if(NT_SUCCESS(ret)) {
-        LOQ_ntstatus("registry", "poiRk", "KeyHandle", KeyHandle, "ValueName", ValueName,
-            "Type", Type, "Buffer", Type, DataSize, Data,
+        LOQ_ntstatus("registry", "poiRik", "KeyHandle", KeyHandle, "ValueName", ValueName,
+			"Type", Type, "Buffer", Type, DataSize, Data, "BufferLength", DataSize,
 			"FullName", KeyHandle, ValueName);
     }
     else {
@@ -290,9 +290,16 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryKey,
 ) {
     NTSTATUS ret = Old_NtQueryKey(KeyHandle, KeyInformationClass,
         KeyInformation, Length, ResultLength);
-    LOQ_ntstatus("registry", "pSl", "KeyHandle", KeyHandle,
-        "KeyInformation", Length, KeyInformation,
-        "KeyInformationClass", KeyInformationClass);
+	if (KeyInformationClass == KeyNameInformation && KeyInformation) {
+		PKEY_NAME_INFORMATION info = (PKEY_NAME_INFORMATION)KeyInformation;
+		LOQ_ntstatus("registry", "pUl", "KeyHandle", KeyHandle,
+			"KeyInformation", info->KeyNameLength/sizeof(WCHAR), info->KeyName,
+			"KeyInformationClass", KeyInformationClass);
+	} else {
+		LOQ_ntstatus("registry", "pSl", "KeyHandle", KeyHandle,
+			"KeyInformation", Length, KeyInformation,
+			"KeyInformationClass", KeyInformationClass);
+	}
     return ret;
 }
 

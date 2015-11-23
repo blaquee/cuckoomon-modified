@@ -149,7 +149,7 @@ void file_write(HANDLE file_handle)
         new_file(&str);
 
         // delete the file record from the list
-        lookup_del(&g_files, (unsigned int) file_handle);
+        lookup_del(&g_files, (ULONG_PTR)file_handle);
     }
 
 	set_lasterrors(&lasterror);
@@ -266,9 +266,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateFile,
 	ret = Old_NtCreateFile(FileHandle, DesiredAccess,
         ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes,
         ShareAccess | FILE_SHARE_READ, CreateDisposition, CreateOptions, EaBuffer, EaLength);
-    LOQ_ntstatus("filesystem", "PhOiihs", "FileHandle", FileHandle, "DesiredAccess", DesiredAccess,
+    LOQ_ntstatus("filesystem", "PhOiihss", "FileHandle", FileHandle, "DesiredAccess", DesiredAccess,
         "FileName", ObjectAttributes, "CreateDisposition", CreateDisposition,
-        "ShareAccess", ShareAccess, "FileAttributes", FileAttributes, "ExistedBefore", file_existed ? "yes" : "no");
+        "ShareAccess", ShareAccess, "FileAttributes", FileAttributes, "ExistedBefore", file_existed ? "yes" : "no", "StackPivoted", is_stack_pivoted() ? "yes" : "no");
     if(NT_SUCCESS(ret)) {
 		add_file_to_log_tracking(*FileHandle);
 		if (DesiredAccess & DUMP_FILE_MASK)
@@ -330,18 +330,24 @@ HOOKDEF(NTSTATUS, WINAPI, NtReadFile,
 	wchar_t *fname;
 	BOOLEAN deletelast;
 	unsigned int read_count = 0;
+	ULONG_PTR length;
+
+	if (NT_SUCCESS(ret))
+		length = IoStatusBlock->Information;
+	else
+		length = 0;
 
 	if (!InterlockedExchange(&init_readfile_critsec, 1))
 		InitializeCriticalSection(&readfile_critsec);
 
 	if (get_last_api() == API_NTREADFILE && FileHandle == LastFileHandle) {
 		// can overflow, but we don't care much
-		AccumulatedLength += (ULONG)IoStatusBlock->Information;
+		AccumulatedLength += (ULONG)length;
 		deletelast = TRUE;
 	}
 	else {
 		PVOID prev;
-		SIZE_T len = min(IoStatusBlock->Information, BUFFER_LOG_MAX);
+		SIZE_T len = min(length, buffer_log_max);
 		PVOID newbuf;
 
 		EnterCriticalSection(&readfile_critsec);
@@ -352,7 +358,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtReadFile,
 		if (prev)
 			free(prev);
 		LastFileHandle = FileHandle;
-		AccumulatedLength = (ULONG)IoStatusBlock->Information;
+		AccumulatedLength = (ULONG)length;
 		InitialBufferLength = len;
 		LeaveCriticalSection(&readfile_critsec);
 
@@ -395,6 +401,12 @@ HOOKDEF(NTSTATUS, WINAPI, NtWriteFile,
 		IoStatusBlock, Buffer, Length, ByteOffset, Key);
 	wchar_t *fname;
 	unsigned int write_count;
+	ULONG_PTR length;
+
+	if (NT_SUCCESS(ret))
+		length = IoStatusBlock->Information;
+	else
+		length = 0;
 
 	write_count = increment_file_log_write_count(FileHandle);
 	if (write_count <= 50) {
@@ -403,11 +415,11 @@ HOOKDEF(NTSTATUS, WINAPI, NtWriteFile,
 
 		if (write_count < 50) {
 			LOQ_ntstatus("filesystem", "pFbl", "FileHandle", FileHandle,
-				"HandleName", fname, "Buffer", IoStatusBlock->Information, Buffer, "Length", IoStatusBlock->Information);
+				"HandleName", fname, "Buffer", length, Buffer, "Length", length);
 		}
 		else if (write_count == 50) {
 			LOQ_ntstatus("filesystem", "pFbls", "FileHandle", FileHandle,
-				"HandleName", fname, "Buffer", IoStatusBlock->Information, Buffer, "Length", IoStatusBlock->Information, "Status", "Maximum logged writes reached for this file");
+				"HandleName", fname, "Buffer", length, Buffer, "Length", length, "Status", "Maximum logged writes reached for this file");
 
 		}
 
@@ -452,14 +464,21 @@ HOOKDEF(NTSTATUS, WINAPI, NtDeviceIoControlFile,
     __out  PVOID OutputBuffer,
     __in   ULONG OutputBufferLength
 ) {
+	ULONG_PTR length;
     NTSTATUS ret = Old_NtDeviceIoControlFile(FileHandle, Event,
         ApcRoutine, ApcContext, IoStatusBlock, IoControlCode,
         InputBuffer, InputBufferLength, OutputBuffer,
         OutputBufferLength);
+
+	if (NT_SUCCESS(ret))
+		length = IoStatusBlock->Information;
+	else
+		length = 0;
+
 	LOQ_ntstatus("device", "phbb", "FileHandle", FileHandle,
 		"IoControlCode", IoControlCode,
         "InputBuffer", InputBufferLength, InputBuffer,
-        "OutputBuffer", IoStatusBlock->Information, OutputBuffer);
+        "OutputBuffer", length, OutputBuffer);
 
 	if (!g_config.no_stealth && NT_SUCCESS(ret) && OutputBuffer)
 		perform_device_fakery(OutputBuffer, OutputBufferLength, IoControlCode);
@@ -482,6 +501,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryFile,
 ) {
 	OBJECT_ATTRIBUTES objattr;
 	NTSTATUS ret;
+	ULONG_PTR length;
 
 	memset(&objattr, 0, sizeof(objattr));
 	objattr.ObjectName = FileName;
@@ -491,6 +511,12 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryFile,
         ApcRoutine, ApcContext, IoStatusBlock, FileInformation,
         Length, FileInformationClass, ReturnSingleEntry,
         FileName, RestartScan);
+
+	if (NT_SUCCESS(ret))
+		length = IoStatusBlock->Information;
+	else
+		length = 0;
+
 	/* don't log the resulting buffer, otherwise we can't turn these calls into simple duplicates */
 	if (FileInformationClass == FileNamesInformation) {
 		LOQ_ntstatus("filesystem", "pOi", "FileHandle", FileHandle,
@@ -498,7 +524,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryFile,
 	}
 	else {
 		LOQ_ntstatus("filesystem", "pbOi", "FileHandle", FileHandle,
-			"FileInformation", IoStatusBlock->Information, FileInformation,
+			"FileInformation", length, FileInformation,
 			"FileName", &objattr, "FileInformationClass", FileInformationClass);
 	}
     return ret;
@@ -514,15 +540,21 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryInformationFile,
 	wchar_t *fname = calloc(32768, sizeof(wchar_t));
 	wchar_t *absolutepath = calloc(32768, sizeof(wchar_t));
 	NTSTATUS ret;
-
+	ULONG_PTR length;
 
 	path_from_handle(FileHandle, fname, 32768);
 	ensure_absolute_unicode_path(absolutepath, fname);
 
 	ret = Old_NtQueryInformationFile(FileHandle, IoStatusBlock,
         FileInformation, Length, FileInformationClass);
+
+	if (NT_SUCCESS(ret))
+		length = IoStatusBlock->Information;
+	else
+		length = 0;
+
 	LOQ_ntstatus("filesystem", "puib", "FileHandle", FileHandle, "HandleName", absolutepath, "FileInformationClass", FileInformationClass,
-        "FileInformation", IoStatusBlock->Information, FileInformation);
+        "FileInformation", length, FileInformation);
 
 	free(fname);
 	free(absolutepath);
@@ -602,6 +634,24 @@ HOOKDEF(NTSTATUS, WINAPI, NtCreateDirectoryObject,
         ObjectAttributes);
 	LOQ_ntstatus("filesystem", "PhO", "DirectoryHandle", DirectoryHandle,
         "DesiredAccess", DesiredAccess, "ObjectAttributes", ObjectAttributes);
+    return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryObject,
+  __in       HANDLE DirectoryHandle,
+  __out_opt  PVOID Buffer,
+  __in       ULONG Length,
+  __in       BOOLEAN ReturnSingleEntry,
+  __in       BOOLEAN RestartScan,
+  __inout    PULONG Context,
+  __out_opt  PULONG ReturnLength
+) {
+    NTSTATUS ret = Old_NtQueryDirectoryObject(DirectoryHandle, Buffer, Length,
+        ReturnSingleEntry, RestartScan, Context, ReturnLength);
+    // Don't log STATUS_BUFFER_TOO_SMALL
+    if (ret != 0xC0000023)
+        LOQ_ntstatus("filesystem", "p", "DirectoryHandle", DirectoryHandle);
+
     return ret;
 }
 
@@ -708,7 +758,20 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExA,
 		ret = INVALID_HANDLE_VALUE;
 	}
 
-	LOQ_handle("filesystem", "f", "FileName", lpFileName);
+	if (!g_config.no_stealth && ret != INVALID_HANDLE_VALUE && (!stricmp(lpFileName, "c:\\windows") || !stricmp(lpFileName, "c:\\pagefile.sys")))
+		perform_create_time_fakery(&((PWIN32_FIND_DATAA)lpFindFileData)->ftCreationTime);
+
+	if (g_config.serial_number && ret != INVALID_HANDLE_VALUE && !stricmp(lpFileName, "c:\\System Volume Information"))
+		((PWIN32_FIND_DATAA)lpFindFileData)->ftCreationTime = g_config.sysvol_ctime;
+	if (g_config.serial_number && ret != INVALID_HANDLE_VALUE && !stricmp(lpFileName, "c:\\windows\\system32"))
+		((PWIN32_FIND_DATAA)lpFindFileData)->ftCreationTime = g_config.sys32_ctime;
+
+	if (ret != INVALID_HANDLE_VALUE)
+		LOQ_handle("filesystem", "fhh", "FileName", lpFileName,
+			"FirstCreateTimeLow", ((PWIN32_FIND_DATAA)lpFindFileData)->ftCreationTime.dwLowDateTime,
+			"FirstCreateTimeHigh", ((PWIN32_FIND_DATAA)lpFindFileData)->ftCreationTime.dwHighDateTime);
+	else
+		LOQ_handle("filesystem", "f", "FileName", lpFileName);
 
 	return ret;
 }
@@ -735,7 +798,20 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 		ret = INVALID_HANDLE_VALUE;
 	}
 
-	LOQ_handle("filesystem", "F", "FileName", lpFileName);
+	if (!g_config.no_stealth && ret != INVALID_HANDLE_VALUE && (!wcsicmp(lpFileName, L"c:\\windows") || !wcsicmp(lpFileName, L"c:\\pagefile.sys")))
+		perform_create_time_fakery(&((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime);
+
+	if (g_config.serial_number && ret != INVALID_HANDLE_VALUE && !wcsicmp(lpFileName, L"c:\\System Volume Information"))
+		((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime = g_config.sysvol_ctime;
+	if (g_config.serial_number && ret != INVALID_HANDLE_VALUE && !wcsicmp(lpFileName, L"c:\\windows\\system32"))
+		((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime = g_config.sys32_ctime;
+
+	if (ret != INVALID_HANDLE_VALUE)
+		LOQ_handle("filesystem", "Fhh", "FileName", lpFileName,
+			"FirstCreateTimeLow", ((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime.dwLowDateTime,
+			"FirstCreateTimeHigh", ((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime.dwHighDateTime);
+	else
+		LOQ_handle("filesystem", "F", "FileName", lpFileName);
     return ret;
 }
 
@@ -941,6 +1017,28 @@ HOOKDEF(BOOL, WINAPI, GetVolumeNameForVolumeMountPointW,
 		replace_wstring_in_buf(lpszVolumeName, cchBufferLength, L"VMware", L"DELL__");
 		replace_wstring_in_buf(lpszVolumeName, cchBufferLength, L"VMWar", L"WDRed");
 	}
+
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetVolumeInformationByHandleW,
+	_In_      HANDLE  hFile,
+	_Out_opt_ LPWSTR  lpVolumeNameBuffer,
+	_In_      DWORD   nVolumeNameSize,
+	_Out_opt_ LPDWORD lpVolumeSerialNumber,
+	_Out_opt_ LPDWORD
+	lpMaximumComponentLength,
+	_Out_opt_ LPDWORD lpFileSystemFlags,
+	_Out_opt_ LPWSTR  lpFileSystemNameBuffer,
+	_In_      DWORD   nFileSystemNameSize
+) {
+	BOOL ret = Old_GetVolumeInformationByHandleW(hFile, lpVolumeNameBuffer, nVolumeNameSize, lpVolumeSerialNumber,
+		lpMaximumComponentLength, lpFileSystemFlags, lpFileSystemNameBuffer, nFileSystemNameSize);
+
+	if (ret && lpVolumeSerialNumber && g_config.serial_number)
+		*lpVolumeSerialNumber = g_config.serial_number;
+
+	LOQ_bool("filesystem", "uH", "VolumeName", lpVolumeNameBuffer, "VolumeSerial", lpVolumeSerialNumber);
 
 	return ret;
 }

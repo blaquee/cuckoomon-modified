@@ -84,7 +84,7 @@ void debug_message(const char *msg);
 
 int log_resolve_index(const char *funcname, int index);
 extern const char *logtbl[][2];
-extern int g_log_index;
+extern volatile LONG g_log_index;
 
 extern DWORD g_log_thread_id;
 extern DWORD g_logwatcher_thread_id;
@@ -97,11 +97,16 @@ enum {
 void set_special_api(DWORD API, BOOLEAN deletelast);
 DWORD get_last_api(void);
 
-#define BUFFER_LOG_MAX 256
+extern size_t buffer_log_max;
+extern size_t large_buffer_log_max;
 
-#define _LOQ(eval, cat, fmt, ...) do { static int _index; if(_index == 0) \
-    _index = ++g_log_index; loq(_index, cat, \
-    &__FUNCTION__[4], eval, (int) ret, fmt, ##__VA_ARGS__); } while (0)
+#define _LOQ(eval, cat, fmt, ...) \
+do { \
+	static volatile LONG _index; \
+    if (_index == 0) \
+		InterlockedExchange(&_index, InterlockedIncrement(&g_log_index)); \
+	loq(_index, cat, &__FUNCTION__[4], eval, (ULONG_PTR)ret, fmt, ##__VA_ARGS__); \
+} while (0)
 
 #define LOQ_ntstatus(cat, fmt, ...) _LOQ(NT_SUCCESS(ret), cat, fmt, ##__VA_ARGS__)
 #define LOQ_nonnull(cat, fmt, ...) _LOQ(ret != NULL, cat, fmt, ##__VA_ARGS__)

@@ -204,7 +204,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtOpenProcess,
 	NTSTATUS ret;
 
     if(ClientId != NULL) {
-        pid = (int) ClientId->UniqueProcess;
+        pid = (int)(ULONG_PTR)ClientId->UniqueProcess;
     }
 
     if(is_protected_pid(pid)) {
@@ -254,7 +254,7 @@ HOOKDEF(NTSTATUS, WINAPI, NtTerminateProcess,
 		process_shutting_down = 1;
 		LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
 	}
-	else if (GetCurrentProcessId() == GetProcessId(ProcessHandle)) {
+	else if (GetCurrentProcessId() == our_getprocessid(ProcessHandle)) {
 		process_shutting_down = 1;
 		LOQ_ntstatus("process", "ph", "ProcessHandle", ProcessHandle, "ExitCode", ExitStatus);
 		pipe("KILL:%d", GetCurrentProcessId());
@@ -373,9 +373,9 @@ HOOKDEF(NTSTATUS, WINAPI, NtMapViewOfSection,
 	DWORD pid = pid_from_process_handle(ProcessHandle);
 
 	if ((pid != GetCurrentProcessId()) || Win32Protect != PAGE_READWRITE)
-		LOQ_ntstatus("process", "ppPpPh", "SectionHandle", SectionHandle,
+		LOQ_ntstatus("process", "ppPpPhs", "SectionHandle", SectionHandle,
 		"ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
-		"SectionOffset", SectionOffset, "ViewSize", ViewSize, "Win32Protect", Win32Protect);
+		"SectionOffset", SectionOffset, "ViewSize", ViewSize, "Win32Protect", Win32Protect, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
 
 	if (NT_SUCCESS(ret)) {
 		if (pid != GetCurrentProcessId()) {
@@ -395,16 +395,14 @@ HOOKDEF(NTSTATUS, WINAPI, NtAllocateVirtualMemory,
     __in     ULONG AllocationType,
     __in     ULONG Protect
 ) {
-	lasterror_t lasterror;
     NTSTATUS ret = Old_NtAllocateVirtualMemory(ProcessHandle, BaseAddress,
         ZeroBits, RegionSize, AllocationType, Protect);
 
-	get_lasterrors(&lasterror);
-	if (Protect != PAGE_READWRITE || GetCurrentProcessId() != GetProcessId(ProcessHandle)) {
-		LOQ_ntstatus("process", "pPPh", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
-			"RegionSize", RegionSize, "Protection", Protect);
+	if (ret != STATUS_CONFLICTING_ADDRESSES && (Protect != PAGE_READWRITE || GetCurrentProcessId() != our_getprocessid(ProcessHandle))) {
+		LOQ_ntstatus("process", "pPPhs", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
+			"RegionSize", RegionSize, "Protection", Protect, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
 	}
-	set_lasterrors(&lasterror);
+
 	return ret;
 }
 
@@ -467,8 +465,8 @@ HOOKDEF(NTSTATUS, WINAPI, NtWriteVirtualMemory,
 	pid = pid_from_process_handle(ProcessHandle);
 
 	if (pid != GetCurrentProcessId()) {
-		LOQ_ntstatus("process", "ppB", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
-			"Buffer", NumberOfBytesWritten, Buffer);
+		LOQ_ntstatus("process", "ppBhs", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
+			"Buffer", NumberOfBytesWritten, Buffer, "BufferLength", *NumberOfBytesWritten, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
 
 		if (NT_SUCCESS(ret)) {
 			pipe("PROCESS:%d:%d", is_suspended(pid, 0), pid);
@@ -497,8 +495,8 @@ HOOKDEF(BOOL, WINAPI, WriteProcessMemory,
 	pid = pid_from_process_handle(hProcess);
 
 	if (pid != GetCurrentProcessId()) {
-		LOQ_bool("process", "ppB", "ProcessHandle", hProcess, "BaseAddress", lpBaseAddress,
-			"Buffer", lpNumberOfBytesWritten, lpBuffer);
+		LOQ_bool("process", "ppBhs", "ProcessHandle", hProcess, "BaseAddress", lpBaseAddress,
+			"Buffer", lpNumberOfBytesWritten, lpBuffer, "BufferLength", *lpNumberOfBytesWritten, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
 
 		if (ret) {
 			pipe("PROCESS:%d:%d", is_suspended(pid, 0), pid);
@@ -509,6 +507,10 @@ HOOKDEF(BOOL, WINAPI, WriteProcessMemory,
 	return ret;
 }
 
+/* need to keep in mind we might end up being called in either of the two below functions while some
+   critical DLL code is protected RW by some poorly-written malware that doesn't care about reliability with
+   concurrent thread execution
+ */
 HOOKDEF(NTSTATUS, WINAPI, NtProtectVirtualMemory,
     IN      HANDLE ProcessHandle,
     IN OUT  PVOID *BaseAddress,
@@ -517,17 +519,27 @@ HOOKDEF(NTSTATUS, WINAPI, NtProtectVirtualMemory,
     OUT     PULONG OldAccessProtection
 ) {
 	NTSTATUS ret;
+	MEMORY_BASIC_INFORMATION meminfo;
 
 	if (NewAccessProtection == PAGE_EXECUTE_READ && BaseAddress && NumberOfBytesToProtect &&
-		GetCurrentProcessId() == GetProcessId(ProcessHandle) && is_in_dll_range((ULONG_PTR)*BaseAddress))
+		GetCurrentProcessId() == our_getprocessid(ProcessHandle) && is_in_dll_range((ULONG_PTR)*BaseAddress))
 		restore_hooks_on_range((ULONG_PTR)*BaseAddress, (ULONG_PTR)*BaseAddress + *NumberOfBytesToProtect);
 	
 	ret = Old_NtProtectVirtualMemory(ProcessHandle, BaseAddress,
         NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection);
-    LOQ_ntstatus("process", "pPPhH", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
+
+	memset(&meminfo, 0, sizeof(meminfo));
+	if (NT_SUCCESS(ret)) {
+		lasterror_t lasterrors;
+		get_lasterrors(&lasterrors);
+		VirtualQueryEx(ProcessHandle, *BaseAddress, &meminfo, sizeof(meminfo));
+		set_lasterrors(&lasterrors);
+	}
+	LOQ_ntstatus("process", "pPPhhHs", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
         "NumberOfBytesProtected", NumberOfBytesToProtect,
+		"MemoryType", meminfo.Type,
         "NewAccessProtection", NewAccessProtection,
-        "OldAccessProtection", OldAccessProtection);
+		"OldAccessProtection", OldAccessProtection, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
     return ret;
 }
 
@@ -539,15 +551,25 @@ HOOKDEF(BOOL, WINAPI, VirtualProtectEx,
     __out  PDWORD lpflOldProtect
 ) {
 	BOOL ret;
+	MEMORY_BASIC_INFORMATION meminfo;
 
-	if (flNewProtect == PAGE_EXECUTE_READ && GetCurrentProcessId() == GetProcessId(hProcess) &&
+	if (flNewProtect == PAGE_EXECUTE_READ && GetCurrentProcessId() == our_getprocessid(hProcess) &&
 		is_in_dll_range((ULONG_PTR)lpAddress))
 		restore_hooks_on_range((ULONG_PTR)lpAddress, (ULONG_PTR)lpAddress + dwSize);
 
 	ret = Old_VirtualProtectEx(hProcess, lpAddress, dwSize, flNewProtect,
         lpflOldProtect);
-    LOQ_bool("process", "ppph", "ProcessHandle", hProcess, "Address", lpAddress,
-        "Size", dwSize, "Protection", flNewProtect);
+
+	memset(&meminfo, 0, sizeof(meminfo));
+	if (ret) {
+		lasterror_t lasterrors;
+		get_lasterrors(&lasterrors);
+		VirtualQueryEx(hProcess, lpAddress, &meminfo, sizeof(meminfo));
+		set_lasterrors(&lasterrors);
+	}
+
+	LOQ_bool("process", "ppphhHs", "ProcessHandle", hProcess, "Address", lpAddress,
+		"Size", dwSize, "MemType", meminfo.Type, "Protection", flNewProtect, "OldProtection", lpflOldProtect, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
     return ret;
 }
 
@@ -558,17 +580,15 @@ HOOKDEF(NTSTATUS, WINAPI, NtFreeVirtualMemory,
     IN OUT  PSIZE_T RegionSize,
     IN      ULONG FreeType
 ) {
-	lasterror_t lasterror;
     NTSTATUS ret = Old_NtFreeVirtualMemory(ProcessHandle, BaseAddress,
         RegionSize, FreeType);
 
-	get_lasterrors(&lasterror);
-	if (GetCurrentProcessId() != GetProcessId(ProcessHandle)) {
+	if (GetCurrentProcessId() != our_getprocessid(ProcessHandle)) {
 		LOQ_ntstatus("process", "pPPh", "ProcessHandle", ProcessHandle, "BaseAddress", BaseAddress,
 			"RegionSize", RegionSize, "FreeType", FreeType);
 	}
-	set_lasterrors(&lasterror);
-    return ret;
+
+	return ret;
 }
 
 HOOKDEF(BOOL, WINAPI, VirtualFreeEx,
@@ -653,8 +673,16 @@ HOOKDEF_NOTAIL(WINAPI, RtlDispatchException,
 {
 	if (ExceptionRecord && (ULONG_PTR)ExceptionRecord->ExceptionAddress >= g_our_dll_base && (ULONG_PTR)ExceptionRecord->ExceptionAddress < (g_our_dll_base + g_our_dll_size)) {
 		char buf[128];
-		_snprintf(buf, sizeof(buf), "Exception reported at offset 0x%x in cuckoomon itself", (DWORD)((ULONG_PTR)ExceptionRecord->ExceptionAddress - g_our_dll_base));
-		log_anomaly("cuckoocrash", buf);
+		ULONG_PTR seh = 0;
+#ifndef _WIN64
+		DWORD *tebtmp = (DWORD *)NtCurrentTeb();
+		if (tebtmp[0] != 0xffffffff)
+			seh = ((DWORD *)tebtmp[0])[1];
+#endif
+		if (seh < g_our_dll_base || seh >= (g_our_dll_base + g_our_dll_size)) {
+			_snprintf(buf, sizeof(buf), "Exception reported at offset 0x%x in cuckoomon itself", (DWORD)((ULONG_PTR)ExceptionRecord->ExceptionAddress - g_our_dll_base));
+			log_anomaly("cuckoocrash", buf);
+		}
 	}
 
 	// flush logs prior to handling of an exception without having to register a vectored exception handler
@@ -669,13 +697,12 @@ extern LONG WINAPI cuckoomon_exception_handler(
 	);
 #endif
 
-HOOKDEF(NTSTATUS, WINAPI, NtRaiseException,
+HOOKDEF_NOTAIL(WINAPI, NtRaiseException,
 	__in PEXCEPTION_RECORD ExceptionRecord,
 	__in PCONTEXT Context,
 	__in BOOLEAN SearchFrames
 ) {
 	EXCEPTION_POINTERS exc;
-	NTSTATUS ret;
 
 	exc.ContextRecord = Context;
 	exc.ExceptionRecord = ExceptionRecord;
@@ -684,7 +711,5 @@ HOOKDEF(NTSTATUS, WINAPI, NtRaiseException,
 	cuckoomon_exception_handler(&exc);
 #endif
 
-	ret = Old_NtRaiseException(ExceptionRecord, Context, SearchFrames);
-	disable_tail_call_optimization();
-	return ret;
+	return 0;
 }

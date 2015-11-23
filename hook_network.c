@@ -24,6 +24,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "log.h"
 #include "pipe.h"
 #include "config.h"
+#include "misc.h"
 
 static int did_initial_request;
 
@@ -188,7 +189,7 @@ HOOKDEF(HRESULT, WINAPI, URLDownloadToFileW,
 ) {
     HRESULT ret = Old_URLDownloadToFileW(pCaller, szURL, szFileName,
         dwReserved, lpfnCB);
-    LOQ_hresult("network", "uF", "URL", szURL, "FileName", szFileName);
+	LOQ_hresult("network", "uFs", "URL", szURL, "FileName", szFileName, "StackPivoted", is_stack_pivoted() ? "yes" : "no");
     if(ret == S_OK) {
         pipe("FILE_NEW:%S", -1, szFileName);
     }
@@ -312,6 +313,27 @@ HOOKDEF(HINTERNET, WINAPI, InternetOpenUrlW,
     return ret;
 }
 
+typedef BOOL(WINAPI *__HttpAddRequestHeadersA)(HINTERNET hRequest, LPCSTR lpszHeaders, DWORD dwHeadersLength, DWORD dwModifiers);
+__HttpAddRequestHeadersA _HttpAddRequestHeadersA;
+
+void workaround_httpopenrequest_referrer_bug(HINTERNET hRequest)
+{
+	char *buf;
+	lasterror_t lasterror;
+
+	get_lasterrors(&lasterror);
+	buf = malloc(strlen("Referer: ") + strlen(g_config.referrer) + 3);
+
+	if (!_HttpAddRequestHeadersA)
+		_HttpAddRequestHeadersA = (__HttpAddRequestHeadersA)GetProcAddress(LoadLibraryA("wininet"), "HttpAddRequestHeadersA");
+	strcpy(buf, "Referer: ");
+	strcat(buf, g_config.referrer);
+	strcat(buf, "\r\n");
+	_HttpAddRequestHeadersA(hRequest, buf, -1, HTTP_ADDREQ_FLAG_ADD_IF_NEW);
+	free(buf);
+	set_lasterrors(&lasterror);
+}
+
 HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestA,
     __in  HINTERNET hConnect,
     __in  LPCSTR lpszVerb,
@@ -331,9 +353,12 @@ HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestA,
 		referer = lpszReferer;
 
 	ret = Old_HttpOpenRequestA(hConnect, lpszVerb, lpszObjectName,
-        lpszVersion, referer, lplpszAcceptTypes, dwFlags, dwContext);
+		lpszVersion, lpszReferer, lplpszAcceptTypes, dwFlags, dwContext);
     LOQ_nonnull("network", "pshss", "InternetHandle", hConnect, "Path", lpszObjectName,
         "Flags", dwFlags, "Referrer", referer, "Verb", lpszVerb);
+
+	if (ret && referer != lpszReferer)
+		workaround_httpopenrequest_referrer_bug(ret);
 
 	did_initial_request = TRUE;
 
@@ -359,9 +384,12 @@ HOOKDEF(HINTERNET, WINAPI, HttpOpenRequestW,
 		referer = lpszReferer; 
 	
 	ret = Old_HttpOpenRequestW(hConnect, lpszVerb, lpszObjectName,
-        lpszVersion, referer, lplpszAcceptTypes, dwFlags, dwContext);
+		lpszVersion, lpszReferer, lplpszAcceptTypes, dwFlags, dwContext);
     LOQ_nonnull("network", "puhuu", "InternetHandle", hConnect, "Path", lpszObjectName,
 		"Flags", dwFlags, "Referrer", referer, "Verb", lpszVerb);
+
+	if (ret && referer != lpszReferer)
+		workaround_httpopenrequest_referrer_bug(ret);
 
 	did_initial_request = TRUE;
 
@@ -507,6 +535,37 @@ HOOKDEF(BOOL, WINAPI, HttpAddRequestHeadersW,
 		"Modifiers", dwModifiers);
 	return ret;
 }
+
+HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
+	_In_    HINTERNET hRequest,
+	_In_    DWORD     dwInfoLevel,
+	_Inout_ LPVOID    lpvBuffer,
+	_Inout_ LPDWORD   lpdwBufferLength,
+	_Inout_ LPDWORD   lpdwIndex
+) {
+	BOOL ret = Old_HttpQueryInfoA(hRequest, dwInfoLevel, lpvBuffer, lpdwBufferLength, lpdwIndex);
+	if (dwInfoLevel == HTTP_QUERY_DATE)
+		LOQ_bool("network", "piS", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", ret ? *lpdwBufferLength : 0, lpvBuffer);
+	else
+		LOQ_bool("network", "piB", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", lpdwBufferLength, lpvBuffer);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, HttpQueryInfoW,
+	_In_    HINTERNET hRequest,
+	_In_    DWORD     dwInfoLevel,
+	_Inout_ LPVOID    lpvBuffer,
+	_Inout_ LPDWORD   lpdwBufferLength,
+	_Inout_ LPDWORD   lpdwIndex
+) {
+	BOOL ret = Old_HttpQueryInfoW(hRequest, dwInfoLevel, lpvBuffer, lpdwBufferLength, lpdwIndex);
+	if (dwInfoLevel == HTTP_QUERY_DATE)
+		LOQ_bool("network", "piU", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", ret ? (*lpdwBufferLength / sizeof(WCHAR)) : 0, lpvBuffer);
+	else
+		LOQ_bool("network", "piB", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", lpdwBufferLength, lpvBuffer);
+	return ret;
+}
+
 
 HOOKDEF(int, WINAPI, NSPStartup,
 	__in LPGUID lpProviderId,

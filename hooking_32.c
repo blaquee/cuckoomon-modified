@@ -202,10 +202,12 @@ static void hook_create_pre_tramp(hook_t *h)
 		0x60,
 		// cld
 		0xfc,
-		// push dword ptr [esp+36]
-		0xff, 0x74, 0x24, 0x24,
 		// push ebp
 		0x55,
+		// lea eax, dword ptr [esp+40]
+		0x8d, 0x44, 0x24, 0x28,
+		// push eax
+		0x50,
 		// push h
 		0x68, 0x00, 0x00, 0x00, 0x00,
 		// call enter_hook, returns 0 if we should call the original func, otherwise 1 if we should call our New_ version
@@ -270,10 +272,12 @@ static void hook_create_pre_tramp_notail(hook_t *h)
 		0x60,
 		// cld
 		0xfc,
-		// push dword ptr [esp+36]
-		0xff, 0x74, 0x24, 0x24,
 		// push ebp
 		0x55,
+		// lea eax, dword ptr [esp+40]
+		0x8d, 0x44, 0x24, 0x28,
+		// push eax
+		0x50,
 		// push h
 		0x68, 0x00, 0x00, 0x00, 0x00,
 		// call enter_hook, returns 0 if we should call the original func, otherwise 1 if we should call our New_ version
@@ -578,11 +582,21 @@ static ULONG_PTR get_near_rel_target(unsigned char *buf)
 	return 0;
 }
 
+static ULONG_PTR get_short_rel_target(unsigned char *buf)
+{
+	if (buf[0] == 0xeb || buf[0] == 0xe3 || (buf[0] >= 0x70 && buf[0] < 0x80))
+		return (ULONG_PTR)buf + 2 + *(char *)&buf[1];
+
+	assert(0);
+	return 0;
+}
+
 int hook_api(hook_t *h, int type)
 {
 	unsigned char *addr;
 	int ret = -1;
 	DWORD old_protect;
+	BOOL delay_loaded = FALSE;
 
     // table with all possible hooking types
     static struct {
@@ -659,10 +673,8 @@ int hook_api(hook_t *h, int type)
 	// two jumps.
 	if (!memcmp(addr, "\xeb\x05", 2) &&
 		!memcmp(addr + 7, "\xff\x25", 2)) {
-		// Add unhook detection for this region.
-		unhook_detect_add_region(h, addr, addr, addr, 7 + 6);
-
 		addr = **(unsigned char ***)(addr + 9);
+		delay_loaded = TRUE;
 	}
 
 	// Some functions don't just have the short jump and indirect
@@ -672,6 +684,26 @@ int hook_api(hook_t *h, int type)
 	else if (!memcmp(addr, "\x8b\xff\x55\x8b\xec\x5d\xeb\x05", 8) &&
 		!memcmp(addr + 13, "\xff\x25", 2)) {
 		addr = **(unsigned char ***)(addr + 15);
+		delay_loaded = TRUE;
+	}
+	// others have full-dword relative jumps at the end of the stub instead
+	// of short jumps
+	else if (!memcmp(addr, "\x8b\xff\x55\x8b\xec\x5d\xe9", 7)) {
+		PUCHAR target = (PUCHAR)get_near_rel_target(&addr[6]);
+		if (!memcmp(target, "\xff\x25", 2)) {
+			addr = **(unsigned char ***)(target + 2);
+			delay_loaded = TRUE;
+		}
+	}
+	// Others still (observed by KillerInstinct and others on IsDebuggerPresent on some
+	// windows 7 systems) will have a short jump back to an indirect jmp out to one
+	// of the core DLLs, hook that instead
+	else if (addr[0] == 0xeb && addr[1] >= 0x80) {
+		PUCHAR target = (PUCHAR)get_short_rel_target(addr);
+		if (!memcmp(target, "\xff\x25", 2)) {
+			addr = **(unsigned char ***)(target + 2);
+			delay_loaded = TRUE;
+		}
 	}
 
 	// the following applies for "inlined" functions on windows 7,
@@ -681,9 +713,6 @@ int hook_api(hook_t *h, int type)
 	// inlined function.
 	if (!memcmp(addr, "\xeb\x02", 2) &&
 		!memcmp(addr - 5, "\xcc\xcc\xcc\xcc\xcc", 5)) {
-
-		// Add unhook detection for this region.
-		unhook_detect_add_region(h, addr - 5, addr - 5, addr - 5, 5 + 2);
 
 		// step over the short jump and the relative offset
 		addr += 4;
@@ -697,11 +726,32 @@ int hook_api(hook_t *h, int type)
 		type = HOOK_NATIVE_JMP_INDIRECT;
 	}
 
+	/* works around some poorly-written malware doing emulation of assumed bytes
+	   instead of proper code-stealing
+	 */
+	if (!strcmp(h->funcname, "GetSystemTime"))
+		type = HOOK_JMP_DIRECT;
+
 	// check if this is a valid hook type
 	if (type < 0 && type >= ARRAYSIZE(hook_types)) {
 		pipe("WARNING: Provided invalid hook type: %d", type);
 		return ret;
 	}
+
+	if (delay_loaded == TRUE) {
+		if (addr[0] == 0xb8 && addr[5] == 0xe9) {
+			// skip this particular hook, we'll hook the delay-loaded DLL at the time
+			// is is loaded.  This means we will have duplicate "hook" entries
+			// but to avoid any problems, we will check before hooking to see
+			// if the final function has already been hooked
+			return 0;
+		}
+	}
+
+	// make sure we aren't trying to hook the same address twice, as could
+	// happen due to delay-loaded DLLs
+	if (address_already_hooked(addr))
+		return 0;
 
 	// make the address writable
 	if (VirtualProtect(addr, hook_types[type].len, PAGE_EXECUTE_READWRITE,
@@ -753,7 +803,7 @@ int hook_api(hook_t *h, int type)
     return ret;
 }
 
-int operate_on_backtrace(ULONG_PTR retaddr, ULONG_PTR _ebp, int(*func)(ULONG_PTR))
+int operate_on_backtrace(ULONG_PTR _esp, ULONG_PTR _ebp, int(*func)(ULONG_PTR))
 {
 	int ret;
 
@@ -762,7 +812,7 @@ int operate_on_backtrace(ULONG_PTR retaddr, ULONG_PTR _ebp, int(*func)(ULONG_PTR
 
 	unsigned int count = HOOK_BACKTRACE_DEPTH;
 
-	ret = func(retaddr);
+	ret = func(*(ULONG_PTR *)_esp);
 	if (ret)
 		return ret;
 

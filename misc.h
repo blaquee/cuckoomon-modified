@@ -137,6 +137,7 @@ struct dll_range {
 };
 #define MAX_DLLS 100
 
+DWORD our_getprocessid(HANDLE Process);
 BOOL is_in_dll_range(ULONG_PTR addr);
 void add_all_dlls_to_dll_ranges(void);
 
@@ -180,3 +181,7 @@ unsigned int our_htonl(unsigned int num);
 void addr_to_string(const IN_ADDR addr, char *string);
 
 PUNICODE_STRING get_basename_of_module(HMODULE module_handle);
+
+void perform_create_time_fakery(FILETIME *createtime);
+
+int is_stack_pivoted(void);

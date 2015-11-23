@@ -142,15 +142,15 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtCreateDirectoryObject,
     __in   POBJECT_ATTRIBUTES ObjectAttributes
 );
 
-extern HOOKDEF(DWORD, WINAPI, GetFileAttributesA,
-	__in	LPCTSTR lpFileName
-	);
-
-extern HOOKDEF(DWORD, WINAPI, GetFileAttributesExA,
-	__in	LPCTSTR lpFileName,
-	__in	GET_FILEEX_INFO_LEVELS fInfoLevelId,
-	__out	LPVOID lpFileInformation
-	);
+extern HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryObject,
+  __in       HANDLE DirectoryHandle,
+  __out_opt  PVOID Buffer,
+  __in       ULONG Length,
+  __in       BOOLEAN ReturnSingleEntry,
+  __in       BOOLEAN RestartScan,
+  __inout    PULONG Context,
+  __out_opt  PULONG ReturnLength
+);
 
 extern HOOKDEF(BOOL, WINAPI, MoveFileWithProgressW,
     __in      LPWSTR lpExistingFileName,
@@ -307,6 +307,18 @@ extern HOOKDEF(HANDLE, WINAPI, FindFirstChangeNotificationW,
 	_In_	LPCWSTR lpPathName,
 	_In_	BOOL bWatchSubtree,
 	_In_	DWORD dwNotifyFilter
+);
+
+extern HOOKDEF(BOOL, WINAPI, GetVolumeInformationByHandleW,
+	_In_      HANDLE  hFile,
+	_Out_opt_ LPWSTR  lpVolumeNameBuffer,
+	_In_      DWORD   nVolumeNameSize,
+	_Out_opt_ LPDWORD lpVolumeSerialNumber,
+	_Out_opt_ LPDWORD
+	lpMaximumComponentLength,
+	_Out_opt_ LPDWORD lpFileSystemFlags,
+	_Out_opt_ LPWSTR  lpFileSystemNameBuffer,
+	_In_      DWORD   nFileSystemNameSize
 );
 
 //
@@ -957,6 +969,13 @@ extern HOOKDEF(NTSTATUS, WINAPI, NtUnmapViewOfSection,
     _In_opt_  PVOID BaseAddress
 );
 
+extern HOOKDEF(NTSTATUS, WINAPI, NtSetInformationProcess,
+	__in HANDLE ProcessHandle,
+	__in PROCESSINFOCLASS ProcessInformationClass,
+	__in PVOID ProcessInformation,
+	__in ULONG ProcessInformationLength
+);
+
 extern HOOKDEF(NTSTATUS, WINAPI, NtAllocateVirtualMemory,
     __in     HANDLE ProcessHandle,
     __inout  PVOID *BaseAddress,
@@ -1162,6 +1181,17 @@ extern HOOKDEF(NTSTATUS, WINAPI, RtlDecompressBuffer,
 	__in PUCHAR CompressedBuffer,
 	__in ULONG CompressedBufferSize,
 	__out PULONG FinalUncompressedSize
+);
+
+extern HOOKDEF(NTSTATUS, WINAPI, RtlCompressBuffer,
+	_In_  USHORT CompressionFormatAndEngine,
+	_In_  PUCHAR UncompressedBuffer,
+	_In_  ULONG  UncompressedBufferSize,
+	_Out_ PUCHAR CompressedBuffer,
+	_In_  ULONG  CompressedBufferSize,
+	_In_  ULONG  UncompressedChunkSize,
+	_Out_ PULONG FinalCompressedSize,
+	_In_  PVOID  WorkSpace
 );
 
 extern HOOKDEF(NTSTATUS, WINAPI, NtLoadDriver,
@@ -1621,6 +1651,22 @@ extern HOOKDEF(BOOL, WINAPI, HttpAddRequestHeadersW,
 	__in LPCWSTR lpszHeaders,
 	__in DWORD dwHeadersLength,
 	__in DWORD dwModifiers
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
+	_In_    HINTERNET hRequest,
+	_In_    DWORD     dwInfoLevel,
+	_Inout_ LPVOID    lpvBuffer,
+	_Inout_ LPDWORD   lpdwBufferLength,
+	_Inout_ LPDWORD   lpdwIndex
+);
+
+extern HOOKDEF(BOOL, WINAPI, HttpQueryInfoW,
+	_In_    HINTERNET hRequest,
+	_In_    DWORD     dwInfoLevel,
+	_Inout_ LPVOID    lpvBuffer,
+	_Inout_ LPDWORD   lpdwBufferLength,
+	_Inout_ LPDWORD   lpdwIndex
 );
 
 extern HOOKDEF(BOOL, WINAPI, InternetReadFile,

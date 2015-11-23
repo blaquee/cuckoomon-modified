@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ntapi.h"
 #include "config.h"
 #include "misc.h"
+#include "log.h"
 
 int read_config(void)
 {
@@ -138,6 +139,21 @@ int read_config(void)
             else if(!strcmp(key, "force-sleepskip")) {
                 g_config.force_sleepskip = value[0] == '1';
             }
+			else if (!strcmp(key, "serial")) {
+				g_config.serial_number = (unsigned int)strtoul(value, NULL, 16);
+			}
+			else if (!strcmp(key, "sysvol_ctimelow")) {
+				g_config.sysvol_ctime.dwLowDateTime = (unsigned int)strtoul(value, NULL, 16);
+			}
+			else if (!strcmp(key, "sysvol_ctimehigh")) {
+				g_config.sysvol_ctime.dwHighDateTime = (unsigned int)strtoul(value, NULL, 16);
+			}
+			else if (!strcmp(key, "sys32_ctimelow")) {
+				g_config.sys32_ctime.dwLowDateTime = (unsigned int)strtoul(value, NULL, 16);
+			}
+			else if (!strcmp(key, "sys32_ctimehigh")) {
+				g_config.sys32_ctime.dwHighDateTime = (unsigned int)strtoul(value, NULL, 16);
+			}
 			else if (!strcmp(key, "full-logs")) {
 				g_config.full_logs = value[0] == '1';
 			}
@@ -148,7 +164,13 @@ int read_config(void)
 			else if (!strcmp(key, "no-stealth")) {
 				g_config.no_stealth = value[0] == '1';
 			}
-        }
+			else if (!strcmp(key, "buffer-max")) {
+				buffer_log_max = (unsigned int)strtoul(value, NULL, 10);
+			}
+			else if (!strcmp(key, "large-buffer-max")) {
+				large_buffer_log_max = (unsigned int)strtoul(value, NULL, 10);
+			}
+		}
     }
 
 	/* don't suspend logging if this isn't the first process or if we want all the logs */

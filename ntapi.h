@@ -250,6 +250,7 @@ typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION {
 
 #define Suspended 5
 #define STATUS_INFO_LENGTH_MISMATCH  0xc0000004
+#define STATUS_CONFLICTING_ADDRESSES 0xc0000018
 #define STATUS_OBJECT_NAME_NOT_FOUND 0xc0000034
 
 typedef struct _INITIAL_TEB {
@@ -735,6 +736,11 @@ typedef enum  {
     FileFsSectorSizeInformation   = 11
 } FS_INFORMATION_CLASS;
 
+typedef enum {
+	ProcessBreakOnTermination	= 29,
+	ProcessDEPPolicy = 34
+} PROCESSINFOCLASS;
+
 typedef struct _FILE_FS_VOLUME_INFORMATION {
     LARGE_INTEGER VolumeCreationTime;
     ULONG         VolumeSerialNumber;
@@ -757,6 +763,7 @@ static __inline HANDLE handle_from_objattr(OBJECT_ATTRIBUTES *obj)
 
 extern void disable_tail_call_optimization(void);
 
+#define NtCurrentProcess() ((HANDLE)-1)
 #include "alloc.h"
 
 extern BOOL is_64bit_os;

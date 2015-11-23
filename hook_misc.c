@@ -97,8 +97,7 @@ HOOKDEF(NTSTATUS, WINAPI, LdrGetDllHandle,
     __in        PUNICODE_STRING ModuleFileName,
     __out       PHANDLE pHModule
 ) {
-    NTSTATUS ret = Old_LdrGetDllHandle(pwPath, Unused, ModuleFileName,
-        pHModule);
+    NTSTATUS ret = Old_LdrGetDllHandle(pwPath, Unused, ModuleFileName, pHModule);
     LOQ_ntstatus("system", "oP", "FileName", ModuleFileName, "ModuleHandle", pHModule);
     return ret;
 }
@@ -111,7 +110,12 @@ HOOKDEF(NTSTATUS, WINAPI, LdrGetProcedureAddress,
 ) {
     NTSTATUS ret = Old_LdrGetProcedureAddress(ModuleHandle, FunctionName,
         Ordinal, FunctionAddress);
-    LOQ_ntstatus("system", "opSiP", "ModuleName", get_basename_of_module(ModuleHandle), "ModuleHandle", ModuleHandle,
+
+	if (FunctionName != NULL && FunctionName->Length == 13 && FunctionName->Buffer != NULL &&
+		(!strncmp(FunctionName->Buffer, "EncodePointer", 13) || !strncmp(FunctionName->Buffer, "DecodePointer", 13)))
+		return ret;
+
+	LOQ_ntstatus("system", "opSiP", "ModuleName", get_basename_of_module(ModuleHandle), "ModuleHandle", ModuleHandle,
         "FunctionName", FunctionName != NULL ? FunctionName->Length : 0,
             FunctionName != NULL ? FunctionName->Buffer : NULL,
         "Ordinal", Ordinal, "FunctionAddress", FunctionAddress);
@@ -338,7 +342,7 @@ __GetSystemMetrics _GetSystemMetrics;
 
 DWORD WINAPI our_GetSystemMetrics(
 	__in int nIndex
-	) {
+) {
 	if (!_GetSystemMetrics) {
 		_GetSystemMetrics = (__GetSystemMetrics)GetProcAddress(LoadLibraryA("user32"), "GetSystemMetrics");
 	}
@@ -467,9 +471,30 @@ HOOKDEF(NTSTATUS, WINAPI, RtlDecompressBuffer,
 	NTSTATUS ret = Old_RtlDecompressBuffer(CompressionFormat, UncompressedBuffer, UncompressedBufferSize,
 		CompressedBuffer, CompressedBufferSize, FinalUncompressedSize);
 
-	LOQ_ntstatus("misc", "pbh", "UncompressedBufferAddress", UncompressedBuffer, "UncompressedBuffer", ret ? 0 : *FinalUncompressedSize, UncompressedBuffer, "UncompressedBufferLength", ret ? 0 : *FinalUncompressedSize);
+	LOQ_ntstatus("misc", "pbh", "UncompressedBufferAddress", UncompressedBuffer, "UncompressedBuffer",
+		ret ? 0 : *FinalUncompressedSize, UncompressedBuffer, "UncompressedBufferLength", ret ? 0 : *FinalUncompressedSize);
 
 	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, RtlCompressBuffer,
+	_In_  USHORT CompressionFormatAndEngine,
+	_In_  PUCHAR UncompressedBuffer,
+	_In_  ULONG  UncompressedBufferSize,
+	_Out_ PUCHAR CompressedBuffer,
+	_In_  ULONG  CompressedBufferSize,
+	_In_  ULONG  UncompressedChunkSize,
+	_Out_ PULONG FinalCompressedSize,
+	_In_  PVOID  WorkSpace
+) {
+	NTSTATUS ret = Old_RtlCompressBuffer(CompressionFormatAndEngine, UncompressedBuffer, UncompressedBufferSize,
+		CompressedBuffer, CompressedBufferSize, UncompressedChunkSize, FinalCompressedSize, WorkSpace);
+
+	LOQ_ntstatus("misc", "pbh", "UncompressedBufferAddress", UncompressedBuffer, "UncompressedBuffer",
+		ret ? 0 : UncompressedBufferSize, UncompressedBuffer, "UncompressedBufferLength", ret ? 0 : UncompressedBufferSize);
+
+	return ret;
+
 }
 
 HOOKDEF(void, WINAPI, GetSystemInfo,
@@ -485,6 +510,18 @@ HOOKDEF(void, WINAPI, GetSystemInfo,
 	LOQ_void("misc", "");
 
 	return;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, NtSetInformationProcess,
+	__in HANDLE ProcessHandle,
+	__in PROCESSINFOCLASS ProcessInformationClass,
+	__in PVOID ProcessInformation,
+	__in ULONG ProcessInformationLength
+) {
+	NTSTATUS ret = Old_NtSetInformationProcess(ProcessHandle, ProcessInformationClass, ProcessInformation, ProcessInformationLength);
+	if (NT_SUCCESS(ret) && (ProcessInformationClass == ProcessDEPPolicy || ProcessInformationClass == ProcessBreakOnTermination) && ProcessInformationLength == 4)
+		LOQ_ntstatus("misc", "ii", "ProcessInformationClass", ProcessInformationClass, "Value", *(int *)ProcessInformation);
+	return ret;
 }
 
 HOOKDEF(NTSTATUS, WINAPI, NtQuerySystemInformation,
@@ -525,7 +562,7 @@ normal_call:
 		char *their_p = (char *)SystemInformation;
 		ULONG lastlen = 0;
 		while (1) {
-			if (!is_protected_pid((DWORD)our_p->UniqueProcessId)) {
+			if (!is_protected_pid((DWORD)(ULONG_PTR)our_p->UniqueProcessId)) {
 				PSYSTEM_PROCESS_INFORMATION tmp;
 				if (our_p->NextEntryOffset)
 					lastlen = our_p->NextEntryOffset;

@@ -64,6 +64,15 @@ struct _g_config {
     // how many milliseconds since startup
     unsigned int startup_time;
 
+	// system volume serial number (for reproducing Milicenso)
+	unsigned int serial_number;
+
+	// system32 create time (for reproducing Milicenso)
+	FILETIME sys32_ctime;
+
+	// system volume information create time (for reproducing Milicenso)
+	FILETIME sysvol_ctime;
+
     // do we force sleep-skipping despite threads?
     int force_sleepskip;
 

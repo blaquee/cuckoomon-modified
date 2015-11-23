@@ -30,7 +30,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // the size of the logging buffer
 #define BUFFERSIZE 16 * 1024 * 1024
+#define BUFFER_LOG_MAX 256
 #define LARGE_BUFFER_LOG_MAX 2048
+size_t buffer_log_max = BUFFER_LOG_MAX;
+size_t large_buffer_log_max = LARGE_BUFFER_LOG_MAX;
 #define BUFFER_REGVAL_MAX 512
 
 static CRITICAL_SECTION g_mutex;
@@ -60,7 +63,7 @@ static char logtbl_explained[256] = {0};
 // must be one larger than the largeest log ID
 #define LOG_ID_PREDEFINED_MAX 5
 
-int g_log_index = 10;  // index must start after the special IDs (see defines)
+volatile LONG g_log_index = 10;  // index must start after the special IDs (see defines)
 
 //
 // Log API
@@ -233,7 +236,7 @@ static void log_ptr(void *value)
 	if (sizeof(ULONG_PTR) == 8)
 		log_int64((int64_t)value);
 	else
-		log_int32((int)value);
+		log_int32((int)(ULONG_PTR)value);
 }
 
 static void log_string(const char *str, int length)
@@ -300,7 +303,7 @@ static void log_wargv(int argc, const wchar_t ** argv) {
 }
 
 static void log_buffer(const char *buf, size_t length) {
-    size_t trunclength = min(length, BUFFER_LOG_MAX);
+    size_t trunclength = min(length, buffer_log_max);
 
     if (buf == NULL) {
         trunclength = 0;
@@ -310,7 +313,7 @@ static void log_buffer(const char *buf, size_t length) {
 }
 
 static void log_large_buffer(const char *buf, size_t length) {
-	size_t trunclength = min(length, LARGE_BUFFER_LOG_MAX);
+	size_t trunclength = min(length, large_buffer_log_max);
 
 	if (buf == NULL) {
 		trunclength = 0;
@@ -587,9 +590,9 @@ void loq(int index, const char *category, const char *name,
             log_buffer(s, len);
         }
         else if(key == 'B') {
-            size_t *len = va_arg(args, size_t *);
+            DWORD *len = va_arg(args, DWORD *);
             const char *s = va_arg(args, const char *);
-            log_buffer(s, len == NULL ? 0 : *len);
+			log_buffer(s, len == NULL ? 0 : *len);
         }
 		else if (key == 'c') {
 			size_t len = va_arg(args, size_t);
@@ -597,7 +600,7 @@ void loq(int index, const char *category, const char *name,
 			log_large_buffer(s, len);
 		}
 		else if (key == 'C') {
-			size_t *len = va_arg(args, size_t *);
+			DWORD *len = va_arg(args, DWORD *);
 			const char *s = va_arg(args, const char *);
 			log_large_buffer(s, len == NULL ? 0 : *len);
 		}
